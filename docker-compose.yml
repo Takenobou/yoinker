@@ -1,0 +1,16 @@
+services:
+  yoinker:
+    image: ghcr.io/takenobou/yoinker:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - DB_PATH=/data/yoinker.db
+      - LOG_LEVEL=info
+      - DOWNLOAD_ROOT=/data/downloads
+    volumes:
+      - yoinker_data:/data
+    restart: unless-stopped
+
+volumes:
+  yoinker_data:
