@@ -3,18 +3,19 @@ package app
 import "os"
 
 type Config struct {
-	Port     string
-	DBPath   string
-	LogLevel string
+	Port         string
+	DBPath       string
+	LogLevel     string
+	DownloadRoot string
 }
 
 func LoadConfig() (*Config, error) {
 	cfg := &Config{
-		Port:     getEnv("PORT", "3000"),
-		DBPath:   getEnv("DB_PATH", "yoinker.db"),
-		LogLevel: getEnv("LOG_LEVEL", "info"),
+		Port:         getEnv("PORT", "3000"),
+		DBPath:       getEnv("DB_PATH", "yoinker.db"),
+		LogLevel:     getEnv("LOG_LEVEL", "info"),
+		DownloadRoot: getEnv("DOWNLOAD_ROOT", "downloads"),
 	}
-
 	return cfg, nil
 }
 

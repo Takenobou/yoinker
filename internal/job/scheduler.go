@@ -2,9 +2,11 @@ package job
 
 import (
 	"database/sql"
+	"fmt"
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
 	"time"
 
 	"github.com/Takenobou/yoinker/internal/download"
@@ -12,16 +14,18 @@ import (
 )
 
 type Scheduler struct {
-	db     *sql.DB
-	logger *zap.Logger
-	stop   chan struct{}
+	db           *sql.DB
+	logger       *zap.Logger
+	downloadRoot string
+	stop         chan struct{}
 }
 
-func NewScheduler(db *sql.DB, logger *zap.Logger) *Scheduler {
+func NewScheduler(db *sql.DB, logger *zap.Logger, downloadRoot string) *Scheduler {
 	return &Scheduler{
-		db:     db,
-		logger: logger,
-		stop:   make(chan struct{}),
+		db:           db,
+		logger:       logger,
+		downloadRoot: downloadRoot,
+		stop:         make(chan struct{}),
 	}
 }
 
@@ -39,8 +43,8 @@ func (s *Scheduler) run() {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 
-	if err := os.MkdirAll("downloads", 0755); err != nil {
-		s.logger.Error("Failed to create downloads directory", zap.Error(err))
+	if err := os.MkdirAll(s.downloadRoot, 0755); err != nil {
+		s.logger.Error("Failed to create download root directory", zap.Error(err))
 	}
 
 	for {
@@ -73,11 +77,19 @@ func (s *Scheduler) runJobs() {
 				s.logger.Error("Failed to parse URL", zap.String("url", jobItem.URL), zap.Error(err))
 				continue
 			}
+
+			jobDir := filepath.Join(s.downloadRoot, fmt.Sprintf("job_%d", jobItem.ID))
+			if err := os.MkdirAll(jobDir, 0755); err != nil {
+				s.logger.Error("Failed to create job directory", zap.String("jobDir", jobDir), zap.Error(err))
+				continue
+			}
+
 			filename := path.Base(parsed.Path)
 			if filename == "" {
 				filename = "downloaded_file"
 			}
-			dest := "downloads/" + filename
+
+			dest := filepath.Join(jobDir, filename)
 
 			err = download.DownloadFile(jobItem.URL, dest, jobItem.Overwrite, s.logger)
 			if err != nil {

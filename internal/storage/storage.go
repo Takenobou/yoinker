@@ -3,9 +3,8 @@ package storage
 import (
 	"database/sql"
 
-	_ "github.com/mattn/go-sqlite3"
-
 	"github.com/Takenobou/yoinker/internal/app"
+	_ "github.com/mattn/go-sqlite3"
 )
 
 func InitStorage(cfg *app.Config) (*sql.DB, error) {
