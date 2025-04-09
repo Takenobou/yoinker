@@ -381,13 +381,3 @@ func (s *Scheduler) executeJobWithContext(ctx context.Context, jobItem *Job) {
 	s.activeJobs[jobItem.ID].Status = StatusCompleted
 	s.jobsMutex.Unlock()
 }
-
-// For backward compatibility - calls executeJobWithContext with the scheduler's context
-func (s *Scheduler) executeJob(jobItem *Job) {
-	s.executeJobWithContext(s.ctx, jobItem)
-}
-
-// For backward compatibility - calls semWrapperWithContext with the scheduler's context
-func (s *Scheduler) semWrapper(jobItem *Job) {
-	s.semWrapperWithContext(s.ctx, jobItem)
-}
