@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -26,6 +27,14 @@ func main() {
 	}
 	logger.Info("Starting yoinker")
 
+	// Add system info to startup log
+	logger.Info("System information",
+		zap.Int("numCPU", runtime.NumCPU()),
+		zap.String("goVersion", runtime.Version()),
+		zap.String("osType", runtime.GOOS),
+		zap.String("architecture", runtime.GOARCH),
+	)
+
 	db, err := storage.InitStorage(cfg)
 	if err != nil {
 		logger.Fatal("Error initialising database", zap.Error(err))
@@ -37,6 +46,10 @@ func main() {
 	defer scheduler.Stop()
 
 	server := app.NewServer(cfg, db, logger, scheduler)
+
+	// Register enhanced health and metrics endpoints
+	server.RegisterHealthChecks(db)
+
 	go func() {
 		if err := server.Start(); err != nil {
 			logger.Fatal("Error starting server", zap.Error(err))

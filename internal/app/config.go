@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 )
@@ -21,7 +22,35 @@ func LoadConfig() (*Config, error) {
 		DownloadRoot:           getEnv("DOWNLOAD_ROOT", "downloads"),
 		MaxConcurrentDownloads: getEnvAsInt("MAX_CONCURRENT_DOWNLOADS", 5),
 	}
+
+	// Validate configuration
+	if err := validateConfig(cfg); err != nil {
+		return nil, err
+	}
+
 	return cfg, nil
+}
+
+// validateConfig ensures all config values are valid
+func validateConfig(cfg *Config) error {
+	// Validate Port
+	if _, err := strconv.Atoi(cfg.Port); err != nil {
+		return fmt.Errorf("invalid PORT value: %s", cfg.Port)
+	}
+
+	// Validate MaxConcurrentDownloads
+	if cfg.MaxConcurrentDownloads <= 0 {
+		return fmt.Errorf("MAX_CONCURRENT_DOWNLOADS must be greater than 0")
+	}
+
+	// Ensure download directory exists or can be created
+	if _, err := os.Stat(cfg.DownloadRoot); os.IsNotExist(err) {
+		if err := os.MkdirAll(cfg.DownloadRoot, 0755); err != nil {
+			return fmt.Errorf("cannot create download directory: %w", err)
+		}
+	}
+
+	return nil
 }
 
 func getEnv(key, defaultVal string) string {

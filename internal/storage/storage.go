@@ -1,7 +1,9 @@
 package storage
 
 import (
+	"context"
 	"database/sql"
+	"time"
 
 	"github.com/Takenobou/yoinker/internal/app"
 	_ "github.com/mattn/go-sqlite3"
@@ -13,7 +15,16 @@ func InitStorage(cfg *app.Config) (*sql.DB, error) {
 		return nil, err
 	}
 
-	if err = db.Ping(); err != nil {
+	// Set connection pool settings
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(5 * time.Minute)
+
+	// Add a timeout for initialization operations
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err = db.PingContext(ctx); err != nil {
 		return nil, err
 	}
 

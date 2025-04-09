@@ -96,6 +96,13 @@ func (s *Scheduler) GetJobStatus(jobID int) (ActiveJob, bool) {
 func (s *Scheduler) Start() {
 	s.logger.Info("Scheduler starting with gocron")
 	s.refreshJobs()
+
+	// Add periodic job refresh (every 5 minutes)
+	s.cronScheduler.Every(5).Minutes().Do(func() {
+		s.logger.Info("Performing periodic job refresh")
+		s.refreshJobs()
+	})
+
 	s.cronScheduler.StartAsync()
 }
 
