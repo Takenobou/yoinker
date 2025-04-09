@@ -13,19 +13,26 @@ import (
 	"go.uber.org/zap"
 )
 
+const (
+	maxRetries = 3
+	retryDelay = 10 * time.Second
+)
+
 type Scheduler struct {
-	db           *sql.DB
-	logger       *zap.Logger
-	downloadRoot string
-	stop         chan struct{}
+	db            *sql.DB
+	logger        *zap.Logger
+	downloadRoot  string
+	maxConcurrent int
+	stop          chan struct{}
 }
 
-func NewScheduler(db *sql.DB, logger *zap.Logger, downloadRoot string) *Scheduler {
+func NewScheduler(db *sql.DB, logger *zap.Logger, downloadRoot string, maxConcurrent int) *Scheduler {
 	return &Scheduler{
-		db:           db,
-		logger:       logger,
-		downloadRoot: downloadRoot,
-		stop:         make(chan struct{}),
+		db:            db,
+		logger:        logger,
+		downloadRoot:  downloadRoot,
+		maxConcurrent: maxConcurrent,
+		stop:          make(chan struct{}),
 	}
 }
 
@@ -67,42 +74,77 @@ func (s *Scheduler) runJobs() {
 		return
 	}
 
+	sem := make(chan struct{}, s.maxConcurrent)
 	now := time.Now()
 	for _, jobItem := range jobs {
-		if jobItem.LastRun == nil || now.Sub(*jobItem.LastRun) >= time.Duration(jobItem.Interval)*time.Minute {
-			s.logger.Info("Executing job", zap.Int("jobID", jobItem.ID), zap.String("url", jobItem.URL))
-
-			parsed, err := url.Parse(jobItem.URL)
-			if err != nil {
-				s.logger.Error("Failed to parse URL", zap.String("url", jobItem.URL), zap.Error(err))
-				continue
-			}
-
-			jobDir := filepath.Join(s.downloadRoot, fmt.Sprintf("job_%d", jobItem.ID))
-			if err := os.MkdirAll(jobDir, 0755); err != nil {
-				s.logger.Error("Failed to create job directory", zap.String("jobDir", jobDir), zap.Error(err))
-				continue
-			}
-
-			filename := path.Base(parsed.Path)
-			if filename == "" {
-				filename = "downloaded_file"
-			}
-
-			dest := filepath.Join(jobDir, filename)
-
-			err = download.DownloadFile(jobItem.URL, dest, jobItem.Overwrite, s.logger)
-			if err != nil {
-				s.logger.Error("Download failed", zap.Int("jobID", jobItem.ID), zap.Error(err))
-				continue
-			}
-
-			jobItem.LastRun = &now
-			if err := UpdateJob(s.db, jobItem); err != nil {
-				s.logger.Error("Failed to update job last_run", zap.Int("jobID", jobItem.ID), zap.Error(err))
-			} else {
-				s.logger.Info("Job execution updated", zap.Int("jobID", jobItem.ID))
-			}
+		if !jobItem.Enabled {
+			continue
 		}
+
+		if jobItem.LastRun == nil || now.Sub(*jobItem.LastRun) >= time.Duration(jobItem.Interval)*time.Minute {
+			sem <- struct{}{}
+			go func(jobItem Job) {
+				defer func() { <-sem }()
+				s.executeJob(&jobItem)
+			}(jobItem)
+		}
+	}
+
+	for i := 0; i < cap(sem); i++ {
+		sem <- struct{}{}
+	}
+}
+
+func (s *Scheduler) executeJob(jobItem *Job) {
+	s.logger.Info("Executing job", zap.Int("jobID", jobItem.ID), zap.String("url", jobItem.URL))
+
+	parsed, err := url.Parse(jobItem.URL)
+	if err != nil {
+		s.logger.Error("Failed to parse URL", zap.String("url", jobItem.URL), zap.Error(err))
+		return
+	}
+
+	jobDir := filepath.Join(s.downloadRoot, fmt.Sprintf("job_%d", jobItem.ID))
+	if err := os.MkdirAll(jobDir, 0755); err != nil {
+		s.logger.Error("Failed to create job directory", zap.String("jobDir", jobDir), zap.Error(err))
+		return
+	}
+
+	filename := path.Base(parsed.Path)
+	if filename == "" {
+		filename = "downloaded_file"
+	}
+	dest := filepath.Join(jobDir, filename)
+
+	var fileHash string
+	var attempt int
+	var execErr error
+	startTime := time.Now()
+	for attempt = 1; attempt <= maxRetries; attempt++ {
+		s.logger.Info("Attempting download", zap.Int("attempt", attempt), zap.Int("jobID", jobItem.ID))
+		fileHash, execErr = download.DownloadFile(jobItem.URL, dest, jobItem.Overwrite, s.logger)
+		if execErr == nil {
+			break
+		}
+		s.logger.Warn("Download attempt failed", zap.Int("attempt", attempt), zap.Int("jobID", jobItem.ID), zap.Error(execErr))
+		time.Sleep(retryDelay)
+	}
+	if execErr != nil {
+		s.logger.Error("All download attempts failed", zap.Int("jobID", jobItem.ID), zap.Error(execErr))
+		return
+	}
+
+	duration := time.Since(startTime)
+	s.logger.Info("Download succeeded", zap.Int("jobID", jobItem.ID), zap.Duration("duration", duration))
+
+	if err := LogDownload(s.db, jobItem.ID, dest, fileHash); err != nil {
+		s.logger.Error("Failed to log download", zap.Int("jobID", jobItem.ID), zap.Error(err))
+	}
+
+	jobItem.LastRun = &startTime
+	if err := UpdateJob(s.db, *jobItem); err != nil {
+		s.logger.Error("Failed to update job last_run", zap.Int("jobID", jobItem.ID), zap.Error(err))
+	} else {
+		s.logger.Info("Job execution updated", zap.Int("jobID", jobItem.ID))
 	}
 }

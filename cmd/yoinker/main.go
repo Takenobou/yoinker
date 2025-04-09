@@ -32,7 +32,7 @@ func main() {
 	}
 	defer db.Close()
 
-	scheduler := job.NewScheduler(db, logger, cfg.DownloadRoot)
+	scheduler := job.NewScheduler(db, logger, cfg.DownloadRoot, cfg.MaxConcurrentDownloads)
 	scheduler.Start()
 	defer scheduler.Stop()
 

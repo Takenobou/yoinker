@@ -31,7 +31,8 @@ func runMigrations(db *sql.DB) error {
 			url TEXT NOT NULL,
 			interval INTEGER NOT NULL,
 			overwrite BOOLEAN NOT NULL,
-			last_run TIMESTAMP
+			last_run TIMESTAMP,
+			enabled BOOLEAN NOT NULL DEFAULT 1
 		);`,
 		`CREATE TABLE IF NOT EXISTS downloads (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,

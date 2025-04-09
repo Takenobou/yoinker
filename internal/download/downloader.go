@@ -15,20 +15,20 @@ import (
 	"go.uber.org/zap"
 )
 
-func DownloadFile(url, dest string, overwrite bool, logger *zap.Logger) error {
+func DownloadFile(url, dest string, overwrite bool, logger *zap.Logger) (string, error) {
 	logger.Info("Downloading file", zap.String("url", url))
 
 	resp, err := http.Get(url)
 	if err != nil {
 		logger.Error("HTTP GET error", zap.Error(err))
-		return err
+		return "", err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		err = fmt.Errorf("bad status: %s", resp.Status)
 		logger.Error("HTTP GET failed", zap.Error(err))
-		return err
+		return "", err
 	}
 
 	if fileExists(dest) && !overwrite {
@@ -39,7 +39,7 @@ func DownloadFile(url, dest string, overwrite bool, logger *zap.Logger) error {
 	out, err := os.Create(dest)
 	if err != nil {
 		logger.Error("File creation error", zap.Error(err))
-		return err
+		return "", err
 	}
 	defer out.Close()
 
@@ -48,12 +48,12 @@ func DownloadFile(url, dest string, overwrite bool, logger *zap.Logger) error {
 
 	if _, err := io.Copy(writer, resp.Body); err != nil {
 		logger.Error("File write error", zap.Error(err))
-		return err
+		return "", err
 	}
 
 	hash := hex.EncodeToString(hasher.Sum(nil))
 	logger.Info("Download complete", zap.String("dest", dest), zap.String("hash", hash))
-	return nil
+	return hash, nil
 }
 
 func fileExists(p string) bool {
