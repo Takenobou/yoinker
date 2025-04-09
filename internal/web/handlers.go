@@ -5,6 +5,7 @@ import (
 	"strconv"
 
 	"github.com/Takenobou/yoinker/internal/job"
+	"github.com/Takenobou/yoinker/internal/util"
 	"github.com/gofiber/fiber/v2"
 	"go.uber.org/zap"
 )
@@ -59,6 +60,23 @@ func (h *Handlers) GetJob(c *fiber.Ctx) error {
 	return c.JSON(jobData)
 }
 
+// validateJobInput validates the job data for creation or updates
+func validateJobInput(jobData *job.Job, logger *zap.Logger) error {
+	// Validate URL
+	if err := util.ValidateURL(jobData.URL); err != nil {
+		logger.Error("Invalid URL", zap.String("url", jobData.URL), zap.Error(err))
+		return err
+	}
+
+	// Validate interval
+	if err := util.ValidateInterval(jobData.Interval); err != nil {
+		logger.Error("Invalid interval", zap.Int("interval", jobData.Interval), zap.Error(err))
+		return err
+	}
+
+	return nil
+}
+
 // CreateJob creates a new job, inserts it into the database, and immediately schedules it.
 func (h *Handlers) CreateJob(c *fiber.Ctx) error {
 	var jobData job.Job
@@ -66,16 +84,38 @@ func (h *Handlers) CreateJob(c *fiber.Ctx) error {
 		h.Logger.Error("Failed to parse job data", zap.Error(err))
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid job data"})
 	}
+
+	// Validate job data
+	if err := validateJobInput(&jobData, h.Logger); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	// Set default values if needed
+	if !jobData.Enabled {
+		jobData.Enabled = true // Enable by default
+	}
+
 	id, err := job.CreateJob(h.DB, jobData)
 	if err != nil {
 		h.Logger.Error("Failed to create job", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to create job"})
 	}
+
 	// Populate the job with the assigned ID.
 	jobData.ID = int(id)
+
 	// Schedule the new job immediately.
 	h.Scheduler.ScheduleJob(&jobData)
-	return c.JSON(fiber.Map{"id": id})
+
+	h.Logger.Info("Job created successfully",
+		zap.Int("id", int(id)),
+		zap.String("url", jobData.URL),
+		zap.Int("interval", jobData.Interval))
+
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+		"id":      id,
+		"message": "Job created successfully",
+	})
 }
 
 // UpdateJob updates an existing job
@@ -86,17 +126,53 @@ func (h *Handlers) UpdateJob(c *fiber.Ctx) error {
 		h.Logger.Error("Invalid job ID", zap.String("id", idStr), zap.Error(err))
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid job ID"})
 	}
+
+	// First fetch the existing job to ensure it exists
+	existingJob, err := job.GetJob(h.DB, id)
+	if err != nil {
+		h.Logger.Error("Job not found", zap.Int("id", id), zap.Error(err))
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Job not found"})
+	}
+
 	var jobData job.Job
 	if err := c.BodyParser(&jobData); err != nil {
 		h.Logger.Error("Failed to parse job data", zap.Error(err))
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid job data"})
 	}
+
+	// Validate job data
+	if err := validateJobInput(&jobData, h.Logger); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	// Preserve the ID and LastRun fields from the existing job
 	jobData.ID = id
+
+	// Only update LastRun if provided, otherwise keep the existing value
+	if jobData.LastRun == nil {
+		jobData.LastRun = existingJob.LastRun
+	}
+
 	if err := job.UpdateJob(h.DB, jobData); err != nil {
 		h.Logger.Error("Failed to update job", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to update job"})
 	}
-	return c.JSON(fiber.Map{"status": "updated"})
+
+	// If the job is enabled, reschedule it with the updated parameters
+	if jobData.Enabled {
+		h.Scheduler.ScheduleJob(&jobData)
+	}
+
+	h.Logger.Info("Job updated successfully",
+		zap.Int("id", id),
+		zap.String("url", jobData.URL),
+		zap.Int("interval", jobData.Interval),
+		zap.Bool("enabled", jobData.Enabled))
+
+	return c.JSON(fiber.Map{
+		"status":  "updated",
+		"message": "Job updated successfully",
+	})
 }
 
 // DeleteJob deletes a job by its ID
@@ -107,9 +183,23 @@ func (h *Handlers) DeleteJob(c *fiber.Ctx) error {
 		h.Logger.Error("Invalid job ID", zap.String("id", idStr), zap.Error(err))
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid job ID"})
 	}
+
+	// First check if the job exists
+	_, err = job.GetJob(h.DB, id)
+	if err != nil {
+		h.Logger.Error("Job not found for deletion", zap.Int("id", id), zap.Error(err))
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Job not found"})
+	}
+
 	if err := job.DeleteJob(h.DB, id); err != nil {
 		h.Logger.Error("Failed to delete job", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to delete job"})
 	}
-	return c.JSON(fiber.Map{"status": "deleted"})
+
+	h.Logger.Info("Job deleted successfully", zap.Int("id", id))
+
+	return c.JSON(fiber.Map{
+		"status":  "deleted",
+		"message": "Job deleted successfully",
+	})
 }
