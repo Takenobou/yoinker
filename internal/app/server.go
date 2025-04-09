@@ -41,7 +41,7 @@ func (s *Server) registerRoutes() {
 		return c.SendString("Welcome to Yoinker")
 	})
 
-	handlers := web.NewHandlers(s.db, s.logger)
+	handlers := web.NewHandlers(s.db, s.logger, s.scheduler)
 	handlers.RegisterRoutes(s.fiberApp)
 }
 

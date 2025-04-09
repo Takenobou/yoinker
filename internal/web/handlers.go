@@ -10,14 +10,16 @@ import (
 )
 
 type Handlers struct {
-	DB     *sql.DB
-	Logger *zap.Logger
+	DB        *sql.DB
+	Logger    *zap.Logger
+	Scheduler *job.Scheduler
 }
 
-func NewHandlers(db *sql.DB, logger *zap.Logger) *Handlers {
+func NewHandlers(db *sql.DB, logger *zap.Logger, scheduler *job.Scheduler) *Handlers {
 	return &Handlers{
-		DB:     db,
-		Logger: logger,
+		DB:        db,
+		Logger:    logger,
+		Scheduler: scheduler,
 	}
 }
 
@@ -57,7 +59,7 @@ func (h *Handlers) GetJob(c *fiber.Ctx) error {
 	return c.JSON(jobData)
 }
 
-// CreateJob creates a new job
+// CreateJob creates a new job, inserts it into the database, and immediately schedules it.
 func (h *Handlers) CreateJob(c *fiber.Ctx) error {
 	var jobData job.Job
 	if err := c.BodyParser(&jobData); err != nil {
@@ -69,6 +71,10 @@ func (h *Handlers) CreateJob(c *fiber.Ctx) error {
 		h.Logger.Error("Failed to create job", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to create job"})
 	}
+	// Populate the job with the assigned ID.
+	jobData.ID = int(id)
+	// Schedule the new job immediately.
+	h.Scheduler.ScheduleJob(&jobData)
 	return c.JSON(fiber.Map{"id": id})
 }
 

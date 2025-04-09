@@ -15,6 +15,7 @@ import (
 	"go.uber.org/zap"
 )
 
+// DownloadFile downloads a file from the given URL and writes it to dest.
 func DownloadFile(url, dest string, overwrite bool, logger *zap.Logger) (string, error) {
 	logger.Info("Downloading file", zap.String("url", url))
 
@@ -31,9 +32,11 @@ func DownloadFile(url, dest string, overwrite bool, logger *zap.Logger) (string,
 		return "", err
 	}
 
-	if fileExists(dest) && !overwrite {
-		dest = timestampedFilename(dest)
-		logger.Info("File exists, new file will be created", zap.String("dest", dest))
+	if !overwrite {
+		dest = TimestampedFilename(dest)
+		logger.Info("Overwrite disabled, appending timestamp", zap.String("dest", dest))
+	} else if fileExists(dest) {
+		logger.Info("Overwrite enabled, existing file will be overwritten", zap.String("dest", dest))
 	}
 
 	out, err := os.Create(dest)
@@ -61,7 +64,7 @@ func fileExists(p string) bool {
 	return err == nil
 }
 
-func timestampedFilename(original string) string {
+func TimestampedFilename(original string) string {
 	dir := filepath.Dir(original)
 	ext := path.Ext(original)
 	base := strings.TrimSuffix(path.Base(original), ext)
