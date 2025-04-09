@@ -1,12 +1,14 @@
 package job
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"net/url"
 	"os"
 	"path"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/Takenobou/yoinker/internal/download"
@@ -19,16 +21,41 @@ const (
 	retryDelay = 10 * time.Second
 )
 
+// JobStatus represents the current status of a job execution
+type JobStatus string
+
+const (
+	StatusPending   JobStatus = "pending"
+	StatusRunning   JobStatus = "running"
+	StatusCompleted JobStatus = "completed"
+	StatusFailed    JobStatus = "failed"
+)
+
+// ActiveJob holds information about a currently running job
+type ActiveJob struct {
+	JobID     int
+	URL       string
+	StartTime time.Time
+	Status    JobStatus
+	Error     error
+}
+
+// Scheduler manages the scheduling and execution of download jobs
 type Scheduler struct {
-	db            *sql.DB
-	logger        *zap.Logger
-	downloadRoot  string
-	maxConcurrent int
-	cronScheduler *gocron.Scheduler
-	sem           chan struct{}
+	db            *sql.DB            // Database connection for job persistence
+	logger        *zap.Logger        // Logger for recording scheduler events
+	downloadRoot  string             // Root directory for downloads
+	maxConcurrent int                // Maximum number of concurrent downloads
+	cronScheduler *gocron.Scheduler  // Underlying cron scheduler
+	sem           chan struct{}      // Semaphore for limiting concurrent downloads
+	ctx           context.Context    // Context for graceful shutdown
+	cancel        context.CancelFunc // Function to cancel the context
+	activeJobs    map[int]*ActiveJob // Map of currently active jobs by ID
+	jobsMutex     sync.RWMutex       // Mutex for safe concurrent access to the jobs map
 }
 
 func NewScheduler(db *sql.DB, logger *zap.Logger, downloadRoot string, maxConcurrent int) *Scheduler {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Scheduler{
 		db:            db,
 		logger:        logger,
@@ -36,7 +63,34 @@ func NewScheduler(db *sql.DB, logger *zap.Logger, downloadRoot string, maxConcur
 		maxConcurrent: maxConcurrent,
 		cronScheduler: gocron.NewScheduler(time.Local),
 		sem:           make(chan struct{}, maxConcurrent),
+		ctx:           ctx,
+		cancel:        cancel,
+		activeJobs:    make(map[int]*ActiveJob),
 	}
+}
+
+// GetActiveJobs returns a copy of all currently active jobs
+func (s *Scheduler) GetActiveJobs() []ActiveJob {
+	s.jobsMutex.RLock()
+	defer s.jobsMutex.RUnlock()
+
+	jobs := make([]ActiveJob, 0, len(s.activeJobs))
+	for _, job := range s.activeJobs {
+		jobs = append(jobs, *job)
+	}
+	return jobs
+}
+
+// GetJobStatus returns the status of a specific job
+func (s *Scheduler) GetJobStatus(jobID int) (ActiveJob, bool) {
+	s.jobsMutex.RLock()
+	defer s.jobsMutex.RUnlock()
+
+	job, exists := s.activeJobs[jobID]
+	if !exists {
+		return ActiveJob{}, false
+	}
+	return *job, true
 }
 
 func (s *Scheduler) Start() {
@@ -47,7 +101,21 @@ func (s *Scheduler) Start() {
 
 func (s *Scheduler) Stop() {
 	s.logger.Info("Scheduler stopping")
+	// Cancel the context to signal all operations to stop
+	s.cancel()
 	s.cronScheduler.Stop()
+
+	// Wait for a short time to allow in-progress downloads to respond to cancellation
+	time.Sleep(500 * time.Millisecond)
+
+	// Log any jobs that were still active during shutdown
+	s.jobsMutex.RLock()
+	activeCount := len(s.activeJobs)
+	s.jobsMutex.RUnlock()
+
+	if activeCount > 0 {
+		s.logger.Warn("Scheduler stopped with active jobs", zap.Int("activeCount", activeCount))
+	}
 }
 
 // computeNextStartTime computes the next start time for a given job.
@@ -95,9 +163,18 @@ func (s *Scheduler) refreshJobs() {
 			Every(jobToSchedule.Interval).Seconds().
 			StartAt(nextStart).
 			Do(func() {
-				s.sem <- struct{}{}
-				s.executeJob(&jobToSchedule)
-				<-s.sem
+				// Create a job-specific context that is canceled when scheduler context is canceled
+				jobCtx, cancel := context.WithTimeout(s.ctx, time.Duration(jobToSchedule.Interval)*time.Second)
+				defer cancel()
+
+				select {
+				case s.sem <- struct{}{}:
+					s.executeJobWithContext(jobCtx, &jobToSchedule)
+					<-s.sem
+				case <-s.ctx.Done():
+					s.logger.Info("Scheduler context canceled, skipping job execution",
+						zap.Int("jobID", jobToSchedule.ID))
+				}
 			})
 		if err != nil {
 			s.logger.Error("Failed to schedule job", zap.Int("jobID", jobToSchedule.ID), zap.Error(err))
@@ -106,7 +183,7 @@ func (s *Scheduler) refreshJobs() {
 		// If overdue, trigger an immediate execution in a separate goroutine.
 		if overdue {
 			s.logger.Info("Job is overdue, executing immediately", zap.Int("jobID", jobToSchedule.ID))
-			go s.semWrapper(&jobToSchedule)
+			go s.semWrapperWithContext(s.ctx, &jobToSchedule)
 		}
 	}
 }
@@ -124,16 +201,25 @@ func (s *Scheduler) ScheduleJob(jobItem *Job) {
 	if overdue {
 		s.logger.Info("New job is overdue, executing immediately", zap.Int("jobID", jobItem.ID))
 		// Execute immediate download in a separate goroutine.
-		go s.semWrapper(jobItem)
+		go s.semWrapperWithContext(s.ctx, jobItem)
 		newStart := time.Now().Add(time.Second * time.Duration(jobItem.Interval))
 		s.logger.Info("Scheduling recurring job", zap.Int("jobID", jobItem.ID), zap.Time("newStart", newStart))
 		_, err := s.cronScheduler.
 			Every(jobItem.Interval).Seconds().
 			StartAt(newStart).
 			Do(func() {
-				s.sem <- struct{}{}
-				s.executeJob(jobItem)
-				<-s.sem
+				// Create a job-specific context that is canceled when scheduler context is canceled
+				jobCtx, cancel := context.WithTimeout(s.ctx, time.Duration(jobItem.Interval)*time.Second)
+				defer cancel()
+
+				select {
+				case s.sem <- struct{}{}:
+					s.executeJobWithContext(jobCtx, jobItem)
+					<-s.sem
+				case <-s.ctx.Done():
+					s.logger.Info("Scheduler context canceled, skipping job execution",
+						zap.Int("jobID", jobItem.ID))
+				}
 			})
 		if err != nil {
 			s.logger.Error("Failed to schedule recurring job", zap.Int("jobID", jobItem.ID), zap.Error(err))
@@ -144,9 +230,18 @@ func (s *Scheduler) ScheduleJob(jobItem *Job) {
 			Every(jobItem.Interval).Seconds().
 			StartAt(nextStart).
 			Do(func() {
-				s.sem <- struct{}{}
-				s.executeJob(jobItem)
-				<-s.sem
+				// Create a job-specific context that is canceled when scheduler context is canceled
+				jobCtx, cancel := context.WithTimeout(s.ctx, time.Duration(jobItem.Interval)*time.Second)
+				defer cancel()
+
+				select {
+				case s.sem <- struct{}{}:
+					s.executeJobWithContext(jobCtx, jobItem)
+					<-s.sem
+				case <-s.ctx.Done():
+					s.logger.Info("Scheduler context canceled, skipping job execution",
+						zap.Int("jobID", jobItem.ID))
+				}
 			})
 		if err != nil {
 			s.logger.Error("Failed to schedule new job", zap.Int("jobID", jobItem.ID), zap.Error(err))
@@ -154,16 +249,28 @@ func (s *Scheduler) ScheduleJob(jobItem *Job) {
 	}
 }
 
-func (s *Scheduler) semWrapper(jobItem *Job) {
-	s.sem <- struct{}{}
-	s.executeJob(jobItem)
-	<-s.sem
+// semWrapperWithContext wraps executeJobWithContext with semaphore control
+func (s *Scheduler) semWrapperWithContext(ctx context.Context, jobItem *Job) {
+	select {
+	case s.sem <- struct{}{}:
+		s.executeJobWithContext(ctx, jobItem)
+		<-s.sem
+	case <-ctx.Done():
+		s.logger.Info("Context canceled, skipping job execution", zap.Int("jobID", jobItem.ID))
+	}
 }
 
-// executeJob attempts to download the job's file (with retries),
+// executeJobWithContext attempts to download the job's file (with retries),
 // logs the download, and updates the job's LastRun timestamp.
-func (s *Scheduler) executeJob(jobItem *Job) {
+// It respects context cancellation for graceful shutdown.
+func (s *Scheduler) executeJobWithContext(ctx context.Context, jobItem *Job) {
 	s.logger.Info("Executing job", zap.Int("jobID", jobItem.ID), zap.String("url", jobItem.URL))
+
+	// Check if context is already done before starting work
+	if ctx.Err() != nil {
+		s.logger.Info("Context canceled before execution", zap.Int("jobID", jobItem.ID))
+		return
+	}
 
 	parsed, err := url.Parse(jobItem.URL)
 	if err != nil {
@@ -187,21 +294,74 @@ func (s *Scheduler) executeJob(jobItem *Job) {
 	var attempt int
 	var execErr error
 	startTime := time.Now()
-	for attempt = 1; attempt <= maxRetries; attempt++ {
-		s.logger.Info("Attempting download", zap.Int("attempt", attempt), zap.Int("jobID", jobItem.ID))
-		fileHash, execErr = download.DownloadFile(jobItem.URL, dest, jobItem.Overwrite, s.logger)
-		if execErr == nil {
-			break
-		}
-		s.logger.Warn("Download attempt failed", zap.Int("attempt", attempt), zap.Int("jobID", jobItem.ID), zap.Error(execErr))
-		time.Sleep(retryDelay)
+
+	// Track job status
+	s.jobsMutex.Lock()
+	s.activeJobs[jobItem.ID] = &ActiveJob{
+		JobID:     jobItem.ID,
+		URL:       jobItem.URL,
+		StartTime: startTime,
+		Status:    StatusRunning,
 	}
-	if execErr != nil {
-		s.logger.Error("All download attempts failed", zap.Int("jobID", jobItem.ID), zap.Error(execErr))
-		return
+	s.jobsMutex.Unlock()
+
+	// Use a download context to enable cancellation of the current download
+	downloadCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	downloadComplete := make(chan struct{})
+	go func() {
+		defer close(downloadComplete)
+
+		for attempt = 1; attempt <= maxRetries; attempt++ {
+			// Check if context is canceled before starting new attempt
+			if downloadCtx.Err() != nil {
+				execErr = downloadCtx.Err()
+				s.logger.Info("Download canceled", zap.Int("jobID", jobItem.ID), zap.Error(execErr))
+				return
+			}
+
+			s.logger.Info("Attempting download", zap.Int("attempt", attempt), zap.Int("jobID", jobItem.ID))
+			fileHash, execErr = download.DownloadFileWithContext(downloadCtx, jobItem.URL, dest, jobItem.Overwrite, s.logger)
+			if execErr == nil {
+				break
+			}
+
+			s.logger.Warn("Download attempt failed", zap.Int("attempt", attempt), zap.Int("jobID", jobItem.ID), zap.Error(execErr))
+
+			// Check if context is canceled before sleeping
+			select {
+			case <-downloadCtx.Done():
+				execErr = downloadCtx.Err()
+				s.logger.Info("Download canceled during retry delay", zap.Int("jobID", jobItem.ID), zap.Error(execErr))
+				return
+			case <-time.After(retryDelay):
+				// Continue to next attempt
+			}
+		}
+	}()
+
+	// Wait for either download completion or context cancellation
+	select {
+	case <-downloadComplete:
+		// Download completed or failed on its own
+	case <-ctx.Done():
+		s.logger.Info("Context canceled, aborting download", zap.Int("jobID", jobItem.ID))
+		cancel()           // Cancel the download context
+		<-downloadComplete // Wait for download goroutine to exit
+		execErr = ctx.Err()
 	}
 
 	duration := time.Since(startTime)
+	if execErr != nil {
+		s.logger.Error("Download failed", zap.Int("jobID", jobItem.ID), zap.Error(execErr), zap.Duration("duration", duration))
+		s.jobsMutex.Lock()
+		s.activeJobs[jobItem.ID].Status = StatusFailed
+		s.activeJobs[jobItem.ID].Error = execErr
+		s.jobsMutex.Unlock()
+		return
+	}
+
 	s.logger.Info("Download succeeded", zap.Int("jobID", jobItem.ID), zap.Duration("duration", duration))
 
 	if err := LogDownload(s.db, jobItem.ID, dest, fileHash); err != nil {
@@ -215,4 +375,19 @@ func (s *Scheduler) executeJob(jobItem *Job) {
 	} else {
 		s.logger.Info("Job execution updated", zap.Int("jobID", jobItem.ID))
 	}
+
+	// Mark job as completed
+	s.jobsMutex.Lock()
+	s.activeJobs[jobItem.ID].Status = StatusCompleted
+	s.jobsMutex.Unlock()
+}
+
+// For backward compatibility - calls executeJobWithContext with the scheduler's context
+func (s *Scheduler) executeJob(jobItem *Job) {
+	s.executeJobWithContext(s.ctx, jobItem)
+}
+
+// For backward compatibility - calls semWrapperWithContext with the scheduler's context
+func (s *Scheduler) semWrapper(jobItem *Job) {
+	s.semWrapperWithContext(s.ctx, jobItem)
 }

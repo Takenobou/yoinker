@@ -1,6 +1,7 @@
 package download
 
 import (
+	"context"
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
@@ -16,10 +17,25 @@ import (
 )
 
 // DownloadFile downloads a file from the given URL and writes it to dest.
+// This is a wrapper around DownloadFileWithContext using a background context for backward compatibility.
 func DownloadFile(url, dest string, overwrite bool, logger *zap.Logger) (string, error) {
+	return DownloadFileWithContext(context.Background(), url, dest, overwrite, logger)
+}
+
+// DownloadFileWithContext downloads a file from the given URL and writes it to dest.
+// It respects context cancellation for graceful shutdown.
+func DownloadFileWithContext(ctx context.Context, url, dest string, overwrite bool, logger *zap.Logger) (string, error) {
 	logger.Info("Downloading file", zap.String("url", url))
 
-	resp, err := http.Get(url)
+	// Create request with context for cancellation support
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		logger.Error("Failed to create request", zap.Error(err))
+		return "", err
+	}
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
 	if err != nil {
 		logger.Error("HTTP GET error", zap.Error(err))
 		return "", err
@@ -39,18 +55,70 @@ func DownloadFile(url, dest string, overwrite bool, logger *zap.Logger) (string,
 		logger.Info("Overwrite enabled, existing file will be overwritten", zap.String("dest", dest))
 	}
 
-	out, err := os.Create(dest)
+	// Create a temporary file first, then rename on success
+	tempDest := dest + ".download"
+	out, err := os.Create(tempDest)
 	if err != nil {
 		logger.Error("File creation error", zap.Error(err))
 		return "", err
 	}
-	defer out.Close()
+	defer func() {
+		out.Close()
+		// Clean up temp file on failure
+		if err != nil {
+			os.Remove(tempDest)
+		}
+	}()
 
 	hasher := md5.New()
 	writer := io.MultiWriter(out, hasher)
 
-	if _, err := io.Copy(writer, resp.Body); err != nil {
-		logger.Error("File write error", zap.Error(err))
+	// Use a buffer to minimize small writes
+	buf := make([]byte, 32*1024)
+
+	for {
+		// Check for context cancellation
+		select {
+		case <-ctx.Done():
+			logger.Info("Download canceled by context", zap.String("url", url))
+			return "", ctx.Err()
+		default:
+			// Continue with download
+		}
+
+		nr, er := resp.Body.Read(buf)
+		if nr > 0 {
+			nw, ew := writer.Write(buf[0:nr])
+			if ew != nil {
+				err = ew
+				logger.Error("Write error", zap.Error(err))
+				return "", err
+			}
+			if nr != nw {
+				err = io.ErrShortWrite
+				logger.Error("Short write", zap.Error(err))
+				return "", err
+			}
+		}
+		if er != nil {
+			if er != io.EOF {
+				err = er
+				logger.Error("Read error", zap.Error(err))
+				return "", err
+			}
+			break
+		}
+	}
+
+	// Close the file before renaming
+	if err = out.Close(); err != nil {
+		logger.Error("Error closing file", zap.Error(err))
+		return "", err
+	}
+
+	// Rename temporary file to final destination
+	if err = os.Rename(tempDest, dest); err != nil {
+		logger.Error("Error renaming file", zap.Error(err))
 		return "", err
 	}
 
