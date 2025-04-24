@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -103,4 +104,30 @@ func EnsureSafeFilename(filename string) string {
 	}
 
 	return safe
+}
+
+// GetEnv returns the environment variable key or defaultVal if unset
+func GetEnv(key, defaultVal string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return defaultVal
+}
+
+// GetEnvAsInt returns the environment variable key as int or defaultVal if unset or invalid
+func GetEnvAsInt(key string, defaultVal int) int {
+	if v := os.Getenv(key); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			return i
+		}
+	}
+	return defaultVal
+}
+
+// GetRequiredEnv returns the environment variable key or errors if unset
+func GetRequiredEnv(key string) (string, error) {
+	if v := os.Getenv(key); v != "" {
+		return v, nil
+	}
+	return "", fmt.Errorf("%s environment variable required", key)
 }

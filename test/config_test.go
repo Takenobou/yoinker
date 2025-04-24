@@ -5,13 +5,13 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/Takenobou/yoinker/internal/app"
+	"github.com/Takenobou/yoinker/internal/config"
 )
 
 func TestLoadConfigMissingDBPath(t *testing.T) {
 	// Ensure DB_PATH unset
 	os.Unsetenv("DB_PATH")
-	_, err := app.LoadConfig()
+	_, err := config.LoadConfig()
 	if err == nil {
 		t.Fatal("Expected error when DB_PATH is missing")
 	}
@@ -20,7 +20,7 @@ func TestLoadConfigMissingDBPath(t *testing.T) {
 func TestLoadConfigInvalidPort(t *testing.T) {
 	os.Setenv("DB_PATH", "test.db")
 	os.Setenv("PORT", "notanumber")
-	_, err := app.LoadConfig()
+	_, err := config.LoadConfig()
 	if err == nil || !contains(err.Error(), "invalid PORT") {
 		t.Fatalf("Expected invalid PORT error, got %v", err)
 	}
@@ -36,7 +36,7 @@ func TestLoadConfigCreatesDownloadRoot(t *testing.T) {
 	os.Setenv("PORT", "8080")
 	os.Setenv("DOWNLOAD_ROOT", downloadRoot)
 
-	cfg, err := app.LoadConfig()
+	cfg, err := config.LoadConfig()
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}

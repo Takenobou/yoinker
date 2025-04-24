@@ -5,11 +5,11 @@ import (
 	"database/sql"
 	"time"
 
-	"github.com/Takenobou/yoinker/internal/app"
+	"github.com/Takenobou/yoinker/internal/config"
 	_ "github.com/mattn/go-sqlite3"
 )
 
-func InitStorage(cfg *app.Config) (*sql.DB, error) {
+func InitStorage(cfg *config.Config) (*sql.DB, error) {
 	db, err := sql.Open("sqlite3", cfg.DBPath)
 	if err != nil {
 		return nil, err

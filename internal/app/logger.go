@@ -1,11 +1,12 @@
 package app
 
 import (
+	"github.com/Takenobou/yoinker/internal/config"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
 
-func InitLogger(cfg *Config) (*zap.Logger, error) {
+func InitLogger(cfg *config.Config) (*zap.Logger, error) {
 	var level zapcore.Level
 	if err := level.UnmarshalText([]byte(cfg.LogLevel)); err != nil {
 		level = zap.InfoLevel

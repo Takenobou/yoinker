@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/Takenobou/yoinker/internal/config"
 	"github.com/Takenobou/yoinker/internal/job"
 	"github.com/Takenobou/yoinker/internal/web"
 	"github.com/gofiber/fiber/v2"
@@ -14,14 +15,14 @@ import (
 )
 
 type Server struct {
-	cfg       *Config
+	cfg       *config.Config
 	fiberApp  *fiber.App
 	db        *sql.DB
 	logger    *zap.Logger
 	scheduler *job.Scheduler
 }
 
-func NewServer(cfg *Config, db *sql.DB, logger *zap.Logger, scheduler *job.Scheduler) *Server {
+func NewServer(cfg *config.Config, db *sql.DB, logger *zap.Logger, scheduler *job.Scheduler) *Server {
 	appFiber := fiber.New()
 	s := &Server{
 		cfg:       cfg,

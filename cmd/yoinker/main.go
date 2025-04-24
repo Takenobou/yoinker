@@ -10,13 +10,14 @@ import (
 	"time"
 
 	"github.com/Takenobou/yoinker/internal/app"
+	"github.com/Takenobou/yoinker/internal/config"
 	"github.com/Takenobou/yoinker/internal/job"
 	"github.com/Takenobou/yoinker/internal/storage"
 	"go.uber.org/zap"
 )
 
 func main() {
-	cfg, err := app.LoadConfig()
+	cfg, err := config.LoadConfig()
 	if err != nil {
 		log.Fatalf("Error loading config: %v", err)
 	}

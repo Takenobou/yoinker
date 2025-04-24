@@ -1,18 +1,12 @@
-package app
+package config
 
 import (
 	"fmt"
 	"os"
 	"strconv"
-)
 
-// getRequiredEnv retrieves an environment variable or errors if unset
-func getRequiredEnv(key string) (string, error) {
-	if value := os.Getenv(key); value != "" {
-		return value, nil
-	}
-	return "", fmt.Errorf("%s environment variable required", key)
-}
+	"github.com/Takenobou/yoinker/internal/util"
+)
 
 type Config struct {
 	Port                   string
@@ -24,16 +18,16 @@ type Config struct {
 
 func LoadConfig() (*Config, error) {
 	// Required DB_PATH
-	dbPath, err := getRequiredEnv("DB_PATH")
+	dbPath, err := util.GetRequiredEnv("DB_PATH")
 	if err != nil {
 		return nil, err
 	}
 	cfg := &Config{
-		Port:                   getEnv("PORT", "3000"),
+		Port:                   util.GetEnv("PORT", "3000"),
 		DBPath:                 dbPath,
-		LogLevel:               getEnv("LOG_LEVEL", "info"),
-		DownloadRoot:           getEnv("DOWNLOAD_ROOT", "downloads"),
-		MaxConcurrentDownloads: getEnvAsInt("MAX_CONCURRENT_DOWNLOADS", 5),
+		LogLevel:               util.GetEnv("LOG_LEVEL", "info"),
+		DownloadRoot:           util.GetEnv("DOWNLOAD_ROOT", "downloads"),
+		MaxConcurrentDownloads: util.GetEnvAsInt("MAX_CONCURRENT_DOWNLOADS", 5),
 	}
 
 	// Validate configuration
@@ -64,19 +58,4 @@ func validateConfig(cfg *Config) error {
 	}
 
 	return nil
-}
-
-func getEnv(key, defaultVal string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultVal
-}
-
-func getEnvAsInt(name string, defaultVal int) int {
-	valueStr := os.Getenv(name)
-	if value, err := strconv.Atoi(valueStr); err == nil {
-		return value
-	}
-	return defaultVal
 }
