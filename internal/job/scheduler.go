@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Takenobou/yoinker/internal/download"
+	"github.com/Takenobou/yoinker/internal/util"
 	"github.com/go-co-op/gocron"
 	"go.uber.org/zap"
 )
@@ -141,6 +142,34 @@ func computeNextStartTime(jobItem *Job) (nextStart time.Time, overdue bool) {
 	return candidate, false
 }
 
+// scheduleCron schedules jobItem at startAt with its configured interval.
+func (s *Scheduler) scheduleCron(jobItem *Job, startAt time.Time) {
+	_, err := s.cronScheduler.
+		Every(jobItem.Interval).Seconds().
+		StartAt(startAt).
+		Do(s.runJobClosure(jobItem))
+	if err != nil {
+		s.logger.Error("Failed to schedule job", zap.Int("jobID", jobItem.ID), zap.Error(err))
+	}
+}
+
+// runJobClosure returns the closure to execute a scheduled job with semaphore and cancellation.
+func (s *Scheduler) runJobClosure(jobItem *Job) func() {
+	return func() {
+		jobCtx, cancel := context.WithTimeout(s.ctx, time.Duration(jobItem.Interval)*time.Second)
+		defer cancel()
+
+		select {
+		case s.sem <- struct{}{}:
+			s.executeJobWithContext(jobCtx, jobItem)
+			<-s.sem
+		case <-s.ctx.Done():
+			s.logger.Info("Scheduler context canceled, skipping job execution",
+				zap.Int("jobID", jobItem.ID))
+		}
+	}
+}
+
 // refreshJobs loads all enabled jobs from the database, and schedules each job
 // based on its stored LastRun. If a job is overdue, it triggers an immediate download.
 func (s *Scheduler) refreshJobs() {
@@ -165,27 +194,7 @@ func (s *Scheduler) refreshJobs() {
 			zap.Int("intervalSeconds", jobToSchedule.Interval),
 		)
 
-		// Schedule recurring execution starting at nextStart.
-		_, err := s.cronScheduler.
-			Every(jobToSchedule.Interval).Seconds().
-			StartAt(nextStart).
-			Do(func() {
-				// Create a job-specific context that is canceled when scheduler context is canceled
-				jobCtx, cancel := context.WithTimeout(s.ctx, time.Duration(jobToSchedule.Interval)*time.Second)
-				defer cancel()
-
-				select {
-				case s.sem <- struct{}{}:
-					s.executeJobWithContext(jobCtx, &jobToSchedule)
-					<-s.sem
-				case <-s.ctx.Done():
-					s.logger.Info("Scheduler context canceled, skipping job execution",
-						zap.Int("jobID", jobToSchedule.ID))
-				}
-			})
-		if err != nil {
-			s.logger.Error("Failed to schedule job", zap.Int("jobID", jobToSchedule.ID), zap.Error(err))
-		}
+		s.scheduleCron(&jobToSchedule, nextStart)
 
 		// If overdue, trigger an immediate execution in a separate goroutine.
 		if overdue {
@@ -209,50 +218,13 @@ func (s *Scheduler) ScheduleJob(jobItem *Job) {
 		s.logger.Info("New job is overdue, executing immediately", zap.Int("jobID", jobItem.ID))
 		// Execute immediate download in a separate goroutine.
 		go s.semWrapperWithContext(s.ctx, jobItem)
+
 		newStart := time.Now().Add(time.Second * time.Duration(jobItem.Interval))
 		s.logger.Info("Scheduling recurring job", zap.Int("jobID", jobItem.ID), zap.Time("newStart", newStart))
-		_, err := s.cronScheduler.
-			Every(jobItem.Interval).Seconds().
-			StartAt(newStart).
-			Do(func() {
-				// Create a job-specific context that is canceled when scheduler context is canceled
-				jobCtx, cancel := context.WithTimeout(s.ctx, time.Duration(jobItem.Interval)*time.Second)
-				defer cancel()
-
-				select {
-				case s.sem <- struct{}{}:
-					s.executeJobWithContext(jobCtx, jobItem)
-					<-s.sem
-				case <-s.ctx.Done():
-					s.logger.Info("Scheduler context canceled, skipping job execution",
-						zap.Int("jobID", jobItem.ID))
-				}
-			})
-		if err != nil {
-			s.logger.Error("Failed to schedule recurring job", zap.Int("jobID", jobItem.ID), zap.Error(err))
-		}
+		s.scheduleCron(jobItem, newStart)
 	} else {
 		s.logger.Info("Scheduling new job", zap.Int("jobID", jobItem.ID), zap.Time("nextStart", nextStart))
-		_, err := s.cronScheduler.
-			Every(jobItem.Interval).Seconds().
-			StartAt(nextStart).
-			Do(func() {
-				// Create a job-specific context that is canceled when scheduler context is canceled
-				jobCtx, cancel := context.WithTimeout(s.ctx, time.Duration(jobItem.Interval)*time.Second)
-				defer cancel()
-
-				select {
-				case s.sem <- struct{}{}:
-					s.executeJobWithContext(jobCtx, jobItem)
-					<-s.sem
-				case <-s.ctx.Done():
-					s.logger.Info("Scheduler context canceled, skipping job execution",
-						zap.Int("jobID", jobItem.ID))
-				}
-			})
-		if err != nil {
-			s.logger.Error("Failed to schedule new job", zap.Int("jobID", jobItem.ID), zap.Error(err))
-		}
+		s.scheduleCron(jobItem, nextStart)
 	}
 }
 
@@ -279,26 +251,13 @@ func (s *Scheduler) executeJobWithContext(ctx context.Context, jobItem *Job) {
 		return
 	}
 
-	parsed, err := url.Parse(jobItem.URL)
+	dest, err := s.prepareDestination(jobItem)
 	if err != nil {
-		s.logger.Error("Failed to parse URL", zap.String("url", jobItem.URL), zap.Error(err))
+		s.logger.Error("Failed to prepare destination", zap.Int("jobID", jobItem.ID), zap.Error(err))
 		return
 	}
-
-	jobDir := filepath.Join(s.downloadRoot, fmt.Sprintf("job_%d", jobItem.ID))
-	if err := os.MkdirAll(jobDir, 0755); err != nil {
-		s.logger.Error("Failed to create job directory", zap.String("jobDir", jobDir), zap.Error(err))
-		return
-	}
-
-	filename := path.Base(parsed.Path)
-	if filename == "" {
-		filename = "downloaded_file"
-	}
-	dest := filepath.Join(jobDir, filename)
 
 	var fileHash string
-	var attempt int
 	var execErr error
 	startTime := time.Now()
 
@@ -319,33 +278,7 @@ func (s *Scheduler) executeJobWithContext(ctx context.Context, jobItem *Job) {
 	downloadComplete := make(chan struct{})
 	go func() {
 		defer close(downloadComplete)
-
-		for attempt = 1; attempt <= maxRetries; attempt++ {
-			// Check if context is canceled before starting new attempt
-			if downloadCtx.Err() != nil {
-				execErr = downloadCtx.Err()
-				s.logger.Info("Download canceled", zap.Int("jobID", jobItem.ID), zap.Error(execErr))
-				return
-			}
-
-			s.logger.Info("Attempting download", zap.Int("attempt", attempt), zap.Int("jobID", jobItem.ID))
-			fileHash, execErr = download.DownloadFileWithContext(downloadCtx, jobItem.URL, dest, jobItem.Overwrite, s.logger)
-			if execErr == nil {
-				break
-			}
-
-			s.logger.Warn("Download attempt failed", zap.Int("attempt", attempt), zap.Int("jobID", jobItem.ID), zap.Error(execErr))
-
-			// Check if context is canceled before sleeping
-			select {
-			case <-downloadCtx.Done():
-				execErr = downloadCtx.Err()
-				s.logger.Info("Download canceled during retry delay", zap.Int("jobID", jobItem.ID), zap.Error(execErr))
-				return
-			case <-time.After(retryDelay):
-				// Continue to next attempt
-			}
-		}
+		fileHash, execErr = s.attemptDownload(downloadCtx, jobItem, dest)
 	}()
 
 	// Wait for either download completion or context cancellation
@@ -387,4 +320,48 @@ func (s *Scheduler) executeJobWithContext(ctx context.Context, jobItem *Job) {
 	s.jobsMutex.Lock()
 	s.activeJobs[jobItem.ID].Status = StatusCompleted
 	s.jobsMutex.Unlock()
+}
+
+// prepareDestination constructs the download path for a job
+func (s *Scheduler) prepareDestination(jobItem *Job) (string, error) {
+	// Parse URL path
+	parsed, err := url.Parse(jobItem.URL)
+	if err != nil {
+		return "", fmt.Errorf("invalid URL: %w", err)
+	}
+	// Create job-specific directory
+	jobDir := filepath.Join(s.downloadRoot, fmt.Sprintf("job_%d", jobItem.ID))
+	if err := os.MkdirAll(jobDir, 0755); err != nil {
+		return "", err
+	}
+	// Determine filename
+	filename := path.Base(parsed.Path)
+	if filename == "" {
+		filename = "downloaded_file"
+	}
+	filename = util.EnsureSafeFilename(filename)
+	return filepath.Join(jobDir, filename), nil
+}
+
+// attemptDownload retries downloading up to maxRetries, returning the file hash or error
+func (s *Scheduler) attemptDownload(ctx context.Context, jobItem *Job, dest string) (string, error) {
+	var fileHash string
+	var execErr error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		s.logger.Info("Attempting download", zap.Int("attempt", attempt), zap.Int("jobID", jobItem.ID))
+		fileHash, execErr = download.DownloadFileWithContext(ctx, jobItem.URL, dest, jobItem.Overwrite, s.logger)
+		if execErr == nil {
+			return fileHash, nil
+		}
+		s.logger.Warn("Download attempt failed", zap.Int("attempt", attempt), zap.Int("jobID", jobItem.ID), zap.Error(execErr))
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(retryDelay):
+		}
+	}
+	return "", execErr
 }

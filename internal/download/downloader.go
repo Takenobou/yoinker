@@ -2,8 +2,6 @@ package download
 
 import (
 	"context"
-	"crypto/md5"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Takenobou/yoinker/internal/util"
 	"go.uber.org/zap"
 )
 
@@ -70,44 +69,10 @@ func DownloadFileWithContext(ctx context.Context, url, dest string, overwrite bo
 		}
 	}()
 
-	hasher := md5.New()
-	writer := io.MultiWriter(out, hasher)
-
-	// Use a buffer to minimize small writes
-	buf := make([]byte, 32*1024)
-
-	for {
-		// Check for context cancellation
-		select {
-		case <-ctx.Done():
-			logger.Info("Download canceled by context", zap.String("url", url))
-			return "", ctx.Err()
-		default:
-			// Continue with download
-		}
-
-		nr, er := resp.Body.Read(buf)
-		if nr > 0 {
-			nw, ew := writer.Write(buf[0:nr])
-			if ew != nil {
-				err = ew
-				logger.Error("Write error", zap.Error(err))
-				return "", err
-			}
-			if nr != nw {
-				err = io.ErrShortWrite
-				logger.Error("Short write", zap.Error(err))
-				return "", err
-			}
-		}
-		if er != nil {
-			if er != io.EOF {
-				err = er
-				logger.Error("Read error", zap.Error(err))
-				return "", err
-			}
-			break
-		}
+	// Stream download directly to file
+	if _, err := io.Copy(out, resp.Body); err != nil {
+		logger.Error("Error writing to file", zap.Error(err))
+		return "", err
 	}
 
 	// Close the file before renaming
@@ -122,7 +87,12 @@ func DownloadFileWithContext(ctx context.Context, url, dest string, overwrite bo
 		return "", err
 	}
 
-	hash := hex.EncodeToString(hasher.Sum(nil))
+	// Compute MD5 using helper
+	hash, err := util.ComputeFileMD5(dest)
+	if err != nil {
+		logger.Error("Failed to compute MD5", zap.Error(err))
+		return "", err
+	}
 	logger.Info("Download complete", zap.String("dest", dest), zap.String("hash", hash))
 	return hash, nil
 }

@@ -6,6 +6,14 @@ import (
 	"strconv"
 )
 
+// getRequiredEnv retrieves an environment variable or errors if unset
+func getRequiredEnv(key string) (string, error) {
+	if value := os.Getenv(key); value != "" {
+		return value, nil
+	}
+	return "", fmt.Errorf("%s environment variable required", key)
+}
+
 type Config struct {
 	Port                   string
 	DBPath                 string
@@ -15,9 +23,14 @@ type Config struct {
 }
 
 func LoadConfig() (*Config, error) {
+	// Required DB_PATH
+	dbPath, err := getRequiredEnv("DB_PATH")
+	if err != nil {
+		return nil, err
+	}
 	cfg := &Config{
 		Port:                   getEnv("PORT", "3000"),
-		DBPath:                 getEnv("DB_PATH", "yoinker.db"),
+		DBPath:                 dbPath,
 		LogLevel:               getEnv("LOG_LEVEL", "info"),
 		DownloadRoot:           getEnv("DOWNLOAD_ROOT", "downloads"),
 		MaxConcurrentDownloads: getEnvAsInt("MAX_CONCURRENT_DOWNLOADS", 5),
