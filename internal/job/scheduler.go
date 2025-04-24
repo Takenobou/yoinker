@@ -142,36 +142,18 @@ func computeNextStartTime(jobItem *Job) (nextStart time.Time, overdue bool) {
 	return candidate, false
 }
 
-// scheduleCron schedules jobItem at startAt with its configured interval.
-func (s *Scheduler) scheduleCron(jobItem *Job, startAt time.Time) {
+// scheduleAt sets up the cron scheduler to trigger the job execution with concurrency control
+func (s *Scheduler) scheduleAt(jobItem *Job, startAt time.Time, intervalSeconds int) {
 	_, err := s.cronScheduler.
-		Every(jobItem.Interval).Seconds().
+		Every(intervalSeconds).Seconds().
 		StartAt(startAt).
-		Do(s.runJobClosure(jobItem))
+		Do(func() { s.semWrapperWithContext(s.ctx, jobItem) })
 	if err != nil {
 		s.logger.Error("Failed to schedule job", zap.Int("jobID", jobItem.ID), zap.Error(err))
 	}
 }
 
-// runJobClosure returns the closure to execute a scheduled job with semaphore and cancellation.
-func (s *Scheduler) runJobClosure(jobItem *Job) func() {
-	return func() {
-		jobCtx, cancel := context.WithTimeout(s.ctx, time.Duration(jobItem.Interval)*time.Second)
-		defer cancel()
-
-		select {
-		case s.sem <- struct{}{}:
-			s.executeJobWithContext(jobCtx, jobItem)
-			<-s.sem
-		case <-s.ctx.Done():
-			s.logger.Info("Scheduler context canceled, skipping job execution",
-				zap.Int("jobID", jobItem.ID))
-		}
-	}
-}
-
-// refreshJobs loads all enabled jobs from the database, and schedules each job
-// based on its stored LastRun. If a job is overdue, it triggers an immediate download.
+// refreshJobs loads all enabled jobs, clears existing schedules, and reschedules each job
 func (s *Scheduler) refreshJobs() {
 	s.cronScheduler.Clear()
 
@@ -186,28 +168,19 @@ func (s *Scheduler) refreshJobs() {
 			continue
 		}
 
-		jobToSchedule := jobItem
-		nextStart, overdue := computeNextStartTime(&jobToSchedule)
-		s.logger.Info("Scheduling job",
-			zap.Int("jobID", jobToSchedule.ID),
-			zap.Time("nextStart", nextStart),
-			zap.Int("intervalSeconds", jobToSchedule.Interval),
-		)
+		nextStart, overdue := computeNextStartTime(&jobItem)
+		s.logger.Info("Scheduling job", zap.Int("jobID", jobItem.ID), zap.Time("nextStart", nextStart), zap.Int("intervalSeconds", jobItem.Interval))
 
-		s.scheduleCron(&jobToSchedule, nextStart)
+		s.scheduleAt(&jobItem, nextStart, jobItem.Interval)
 
-		// If overdue, trigger an immediate execution in a separate goroutine.
 		if overdue {
-			s.logger.Info("Job is overdue, executing immediately", zap.Int("jobID", jobToSchedule.ID))
-			go s.semWrapperWithContext(s.ctx, &jobToSchedule)
+			s.logger.Info("Job is overdue, executing immediately", zap.Int("jobID", jobItem.ID))
+			go s.semWrapperWithContext(s.ctx, &jobItem)
 		}
 	}
 }
 
-// ScheduleJob handles the scheduling of a newly created job.
-// If the job is overdue (or has never run), it triggers an immediate download
-// and then schedules the recurring execution starting from now + interval.
-// Otherwise, it simply schedules the job to start at the computed nextStart.
+// ScheduleJob schedules a newly created or updated job, handling immediate execution if overdue
 func (s *Scheduler) ScheduleJob(jobItem *Job) {
 	if !jobItem.Enabled {
 		return
@@ -216,15 +189,14 @@ func (s *Scheduler) ScheduleJob(jobItem *Job) {
 	nextStart, overdue := computeNextStartTime(jobItem)
 	if overdue {
 		s.logger.Info("New job is overdue, executing immediately", zap.Int("jobID", jobItem.ID))
-		// Execute immediate download in a separate goroutine.
 		go s.semWrapperWithContext(s.ctx, jobItem)
-
+		// Recurring schedule starts after interval
 		newStart := time.Now().Add(time.Second * time.Duration(jobItem.Interval))
 		s.logger.Info("Scheduling recurring job", zap.Int("jobID", jobItem.ID), zap.Time("newStart", newStart))
-		s.scheduleCron(jobItem, newStart)
+		s.scheduleAt(jobItem, newStart, jobItem.Interval)
 	} else {
 		s.logger.Info("Scheduling new job", zap.Int("jobID", jobItem.ID), zap.Time("nextStart", nextStart))
-		s.scheduleCron(jobItem, nextStart)
+		s.scheduleAt(jobItem, nextStart, jobItem.Interval)
 	}
 }
 
