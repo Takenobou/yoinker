@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
-	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -38,7 +37,7 @@ func TestDownloadFileWithContext(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tmp, err := ioutil.TempDir("", "dltest")
+	tmp, err := os.MkdirTemp("", "dltest")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +58,7 @@ func TestDownloadFileWithContext(t *testing.T) {
 		t.Errorf("Expected hash %s, got %s", expected, hash)
 	}
 	// file should exist and content match
-	data, err := ioutil.ReadFile(dest)
+	data, err := os.ReadFile(dest)
 	if err != nil {
 		t.Fatal(err)
 	}

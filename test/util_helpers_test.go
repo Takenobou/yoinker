@@ -1,7 +1,6 @@
 package test
 
 import (
-	"io/ioutil"
 	"os"
 	"testing"
 
@@ -9,7 +8,7 @@ import (
 )
 
 func TestComputeFileMD5AndFilesEqual(t *testing.T) {
-	tmp, err := ioutil.TempDir("", "testmd5")
+	tmp, err := os.MkdirTemp("", "testmd5")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -17,7 +16,7 @@ func TestComputeFileMD5AndFilesEqual(t *testing.T) {
 
 	file1 := tmp + "/a.txt"
 	content := []byte("hello world")
-	if err := ioutil.WriteFile(file1, content, 0644); err != nil {
+	if err := os.WriteFile(file1, content, 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -31,7 +30,7 @@ func TestComputeFileMD5AndFilesEqual(t *testing.T) {
 
 	// Write a second identical file
 	file2 := tmp + "/b.txt"
-	if err := ioutil.WriteFile(file2, content, 0644); err != nil {
+	if err := os.WriteFile(file2, content, 0644); err != nil {
 		t.Fatal(err)
 	}
 	equal, err := util.FilesEqual(file1, file2)
