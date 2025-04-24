@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 
 	"github.com/Takenobou/yoinker/internal/util"
@@ -28,6 +29,11 @@ func LoadConfig() (*Config, error) {
 		LogLevel:               util.GetEnv("LOG_LEVEL", "info"),
 		DownloadRoot:           util.GetEnv("DOWNLOAD_ROOT", "downloads"),
 		MaxConcurrentDownloads: util.GetEnvAsInt("MAX_CONCURRENT_DOWNLOADS", 5),
+	}
+
+	// If DBPath refers to a directory, append default DB filename
+	if info, err := os.Stat(cfg.DBPath); err == nil && info.IsDir() {
+		cfg.DBPath = filepath.Join(cfg.DBPath, "yoinker.db")
 	}
 
 	// Validate configuration
