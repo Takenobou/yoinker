@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"mime"
 	"net/http"
 	"os"
@@ -22,23 +21,23 @@ import (
 	"golang.org/x/net/html/charset"
 )
 
-// ErrNotModified is returned when server responds 304 Not Modified
+// ErrNotModified indicates a 304 Not Modified response
 var ErrNotModified = errors.New("not modified")
 
 // DownloadFile downloads a file from the given URL and writes it to dest.
 // This is a wrapper around DownloadFileWithContext using a background context for backward compatibility.
 func DownloadFile(url, dest string, overwrite bool, logger *zap.Logger) (string, error) {
-	hash, _, _, err := DownloadFileExtended(context.Background(), url, dest, overwrite, "", "", logger)
-	return hash, err
+	return DownloadFileWithContext(context.Background(), url, dest, overwrite, logger)
 }
 
-// Insert wrapper for tests compatibility
+// DownloadFileWithContext downloads a file from the given URL and writes it to dest.
+// It respects context cancellation for graceful shutdown. Uses extended version under the hood.
 func DownloadFileWithContext(ctx context.Context, url, dest string, overwrite bool, logger *zap.Logger) (string, error) {
 	hash, _, _, err := DownloadFileExtended(ctx, url, dest, overwrite, "", "", logger)
 	return hash, err
 }
 
-// Rename extended function
+// DownloadFileExtended downloads a file supporting ETag/If-Modified-Since short-circuit and HTTP Range resumes
 func DownloadFileExtended(ctx context.Context, url, dest string, overwrite bool, lastETag, lastModified string, logger *zap.Logger) (string, string, string, error) {
 	logger.Info("Downloading file", zap.String("url", url))
 
@@ -136,9 +135,9 @@ func DownloadFileExtended(ctx context.Context, url, dest string, overwrite bool,
 		f, err := os.Open(dest)
 		if err == nil {
 			if gz, err := gzip.NewReader(f); err == nil {
-				data, _ := ioutil.ReadAll(gz)
+				data, _ := io.ReadAll(gz)
 				gz.Close()
-				ioutil.WriteFile(unpacked, data, 0644)
+				os.WriteFile(unpacked, data, 0644)
 				f.Close()
 				os.Remove(dest)
 				dest = unpacked
@@ -183,11 +182,11 @@ func DownloadFileExtended(ctx context.Context, url, dest string, overwrite bool,
 		lower := strings.ToLower(ct)
 		if idx := strings.Index(lower, "charset="); idx != -1 && !strings.Contains(lower, "utf-8") {
 			cs := lower[idx+8:]
-			raw, err := ioutil.ReadFile(dest)
+			raw, err := os.ReadFile(dest)
 			if err == nil {
 				if r, err := charset.NewReaderLabel(cs, bytes.NewReader(raw)); err == nil {
 					data, _ := io.ReadAll(r)
-					ioutil.WriteFile(dest, data, 0644)
+					os.WriteFile(dest, data, 0644)
 					logger.Info("Transcoded file to UTF-8", zap.String("path", dest))
 				}
 			}

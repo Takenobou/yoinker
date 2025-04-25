@@ -296,25 +296,30 @@ func (s *Scheduler) executeJobWithContext(ctx context.Context, jobItem *Job) {
 	}
 	s.jobsMutex.Unlock()
 
-	// Use a download context to enable cancellation of the current download
+	// Download with ETag/Last-Modified and Range support
 	downloadCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-
-	downloadComplete := make(chan struct{})
-	go func() {
-		defer close(downloadComplete)
-		fileHash, execErr = s.attemptDownload(downloadCtx, downloadURL, dest, jobItem.Overwrite)
-	}()
-
-	// Wait for either download completion or context cancellation
-	select {
-	case <-downloadComplete:
-		// Download completed or failed on its own
-	case <-ctx.Done():
-		s.logger.Info("Context canceled, aborting download", zap.Int("jobID", jobItem.ID))
-		cancel()           // Cancel the download context
-		<-downloadComplete // Wait for download goroutine to exit
-		execErr = ctx.Err()
+	hash, newETag, newLastMod, dlErr := download.DownloadFileExtended(downloadCtx, downloadURL, dest, jobItem.Overwrite, jobItem.LastETag, jobItem.LastModified, s.logger)
+	// Handle 304 Not Modified
+	if dlErr == download.ErrNotModified {
+		s.logger.Info("Not modified - skipped ingest", zap.Int("jobID", jobItem.ID))
+		// Update LastRun timestamp
+		jobItem.LastRun = &startTime
+		UpdateJob(s.db, *jobItem)
+		// Mark job completed
+		s.jobsMutex.Lock()
+		s.activeJobs[jobItem.ID].Status = StatusCompleted
+		s.jobsMutex.Unlock()
+		return
+	}
+	if dlErr != nil {
+		s.logger.Error("Download failed", zap.Int("jobID", jobItem.ID), zap.Error(dlErr))
+		execErr = dlErr
+	} else {
+		fileHash = hash
+		// Update ETag and Last-Modified for future requests
+		jobItem.LastETag = newETag
+		jobItem.LastModified = newLastMod
 	}
 
 	duration := time.Since(startTime)
@@ -434,27 +439,4 @@ func (s *Scheduler) prepareDestination(jobItem *Job) (string, error) {
 		filename = util.EnsureSafeFilename(filename)
 	}
 	return filepath.Join(jobDir, filename), nil
-}
-
-// attemptDownload retries downloading up to maxRetries, returning the file hash or error
-func (s *Scheduler) attemptDownload(ctx context.Context, downloadURL, dest string, overwrite bool) (string, error) {
-	var fileHash string
-	var execErr error
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		if ctx.Err() != nil {
-			return "", ctx.Err()
-		}
-		s.logger.Info("Attempting download", zap.Int("attempt", attempt), zap.String("url", downloadURL))
-		fileHash, execErr = download.DownloadFileWithContext(ctx, downloadURL, dest, overwrite, s.logger)
-		if execErr == nil {
-			return fileHash, nil
-		}
-		s.logger.Warn("Download attempt failed", zap.Int("attempt", attempt), zap.String("url", downloadURL), zap.Error(execErr))
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-time.After(retryDelay):
-		}
-	}
-	return "", execErr
 }
