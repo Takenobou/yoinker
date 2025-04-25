@@ -18,11 +18,9 @@ type Config struct {
 }
 
 func LoadConfig() (*Config, error) {
-	// Required DB_PATH
-	dbPath, err := util.GetRequiredEnv("DB_PATH")
-	if err != nil {
-		return nil, err
-	}
+	// DB_PATH optional; default to ./yoinker.db
+	dbPath := util.GetEnv("DB_PATH", "yoinker.db")
+
 	cfg := &Config{
 		Port:                   util.GetEnv("PORT", "3000"),
 		DBPath:                 dbPath,
@@ -34,6 +32,13 @@ func LoadConfig() (*Config, error) {
 	// If DBPath refers to a directory, append default DB filename
 	if info, err := os.Stat(cfg.DBPath); err == nil && info.IsDir() {
 		cfg.DBPath = filepath.Join(cfg.DBPath, "yoinker.db")
+	}
+	// Ensure parent directory for the database file exists
+	dbDir := filepath.Dir(cfg.DBPath)
+	if dbDir != "." {
+		if err := os.MkdirAll(dbDir, 0755); err != nil {
+			return nil, fmt.Errorf("cannot create DB directory: %w", err)
+		}
 	}
 
 	// Validate configuration
