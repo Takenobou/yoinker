@@ -1,9 +1,14 @@
 package download
 
 import (
+	"archive/zip"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
+	"io/ioutil"
+	"mime"
 	"net/http"
 	"os"
 	"path"
@@ -13,6 +18,7 @@ import (
 
 	"github.com/Takenobou/yoinker/internal/util"
 	"go.uber.org/zap"
+	"golang.org/x/net/html/charset"
 )
 
 // DownloadFile downloads a file from the given URL and writes it to dest.
@@ -47,6 +53,17 @@ func DownloadFileWithContext(ctx context.Context, url, dest string, overwrite bo
 		return "", err
 	}
 
+	// Determine filename override from Content-Disposition
+	if cd := resp.Header.Get("Content-Disposition"); cd != "" {
+		if _, params, err := mime.ParseMediaType(cd); err == nil {
+			if filename, ok := params["filename"]; ok {
+				dir := filepath.Dir(dest)
+				dest = filepath.Join(dir, filename)
+				logger.Info("Applying Content-Disposition filename", zap.String("filename", filename))
+			}
+		}
+	}
+
 	if !overwrite {
 		dest = TimestampedFilename(dest)
 		logger.Info("Overwrite disabled, appending timestamp", zap.String("dest", dest))
@@ -69,8 +86,18 @@ func DownloadFileWithContext(ctx context.Context, url, dest string, overwrite bo
 		}
 	}()
 
+	// Determine if gzip or zip unpack
+	reader := resp.Body
+	// auto-unpack gzip
+	if strings.HasSuffix(strings.ToLower(url), ".gz") || strings.HasSuffix(strings.ToLower(dest), ".gz") {
+		if gz, err := gzip.NewReader(resp.Body); err == nil {
+			reader = gz
+			defer gz.Close()
+		}
+	}
+
 	// Stream download directly to file
-	if _, err := io.Copy(out, resp.Body); err != nil {
+	if _, err := io.Copy(out, reader); err != nil {
 		logger.Error("Error writing to file", zap.Error(err))
 		return "", err
 	}
@@ -85,6 +112,70 @@ func DownloadFileWithContext(ctx context.Context, url, dest string, overwrite bo
 	if err = os.Rename(tempDest, dest); err != nil {
 		logger.Error("Error renaming file", zap.Error(err))
 		return "", err
+	}
+
+	// If gzip unpack removed .gz suffix, adjust dest
+	if strings.HasSuffix(strings.ToLower(dest), ".gz") {
+		unpacked := strings.TrimSuffix(dest, ".gz")
+		f, err := os.Open(dest)
+		if err == nil {
+			if gz, err := gzip.NewReader(f); err == nil {
+				data, _ := ioutil.ReadAll(gz)
+				gz.Close()
+				ioutil.WriteFile(unpacked, data, 0644)
+				f.Close()
+				os.Remove(dest)
+				dest = unpacked
+				logger.Info("Gzip unpacked file", zap.String("path", dest))
+			}
+		}
+	}
+
+	// Auto-unpack zip (assumes single file archive)
+	if strings.HasSuffix(strings.ToLower(dest), ".zip") {
+		if zr, err := zip.OpenReader(dest); err == nil {
+			defer zr.Close()
+			destDir := filepath.Dir(dest)
+			// Extract first file
+			for _, f := range zr.File {
+				if f.FileInfo().IsDir() {
+					os.MkdirAll(filepath.Join(destDir, f.Name), f.Mode())
+					continue
+				}
+				rc, err := f.Open()
+				if err != nil {
+					continue
+				}
+				outPath := filepath.Join(destDir, f.Name)
+				os.MkdirAll(filepath.Dir(outPath), 0755)
+				outFile, err := os.Create(outPath)
+				if err == nil {
+					io.Copy(outFile, rc)
+					outFile.Close()
+				}
+				rc.Close()
+				// Remove zip and set dest to extracted file
+				os.Remove(dest)
+				dest = outPath
+				break
+			}
+		}
+	}
+
+	// Transcode charset to UTF-8 if needed
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		lower := strings.ToLower(ct)
+		if idx := strings.Index(lower, "charset="); idx != -1 && !strings.Contains(lower, "utf-8") {
+			cs := lower[idx+8:]
+			raw, err := ioutil.ReadFile(dest)
+			if err == nil {
+				if r, err := charset.NewReaderLabel(cs, bytes.NewReader(raw)); err == nil {
+					data, _ := io.ReadAll(r)
+					ioutil.WriteFile(dest, data, 0644)
+					logger.Info("Transcoded file to UTF-8", zap.String("path", dest))
+				}
+			}
+		}
 	}
 
 	// Compute MD5 using helper

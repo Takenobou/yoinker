@@ -2,7 +2,10 @@ package web
 
 import (
 	"database/sql"
+	"fmt"
+	"time"
 
+	"github.com/go-co-op/gocron"
 	"github.com/gofiber/fiber/v2"
 	"go.uber.org/zap"
 
@@ -92,10 +95,23 @@ func validateJobInput(jobData *job.Job, logger *zap.Logger) error {
 		return err
 	}
 
-	// Validate interval
-	if err := util.ValidateInterval(jobData.Interval); err != nil {
-		logger.Error("Invalid interval", zap.Int("interval", jobData.Interval), zap.Error(err))
-		return err
+	// Validate interval if no schedule provided
+	if jobData.Schedule == "" {
+		if err := util.ValidateInterval(jobData.Interval); err != nil {
+			logger.Error("Invalid interval", zap.Int("interval", jobData.Interval), zap.Error(err))
+			return err
+		}
+	}
+
+	// Validate schedule if provided
+	if jobData.Schedule != "" {
+		sched := gocron.NewScheduler(time.UTC)
+		// Use Do on a dummy function to catch parsing errors
+		_, err := sched.Cron(jobData.Schedule).Do(func() {})
+		if err != nil {
+			logger.Error("Invalid schedule", zap.String("schedule", jobData.Schedule), zap.Error(err))
+			return fmt.Errorf("invalid schedule: %w", err)
+		}
 	}
 
 	return nil
@@ -151,13 +167,13 @@ func (h *Handlers) UpdateJob(c *fiber.Ctx) error {
 		return nil
 	}
 
-	// Preserve the ID and LastRun fields from the existing job
+	// Preserve the ID, LastRun, and Enabled fields from the existing job
 	jobData.ID = id
-
-	// Only update LastRun if provided, otherwise keep the existing value
 	if jobData.LastRun == nil {
 		jobData.LastRun = existingJob.LastRun
 	}
+	// If enabled not provided in update, keep existing setting
+	jobData.Enabled = existingJob.Enabled
 
 	if err := job.UpdateJob(h.DB, *jobData); err != nil {
 		h.Logger.Error("Failed to update job", zap.Error(err))

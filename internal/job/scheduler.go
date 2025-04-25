@@ -1,25 +1,44 @@
 package job
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
 	"net/url"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
+	"strings"
 	"sync"
+	"text/template"
 	"time"
 
 	"github.com/Takenobou/yoinker/internal/download"
 	"github.com/Takenobou/yoinker/internal/util"
 	"github.com/go-co-op/gocron"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"go.uber.org/zap"
 )
 
 const (
 	maxRetries = 3
 	retryDelay = 10 * time.Second
+)
+
+// Prometheus metrics
+var (
+	downloadTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "yoinker_download_total", Help: "Total download operations",
+	}, []string{"status"})
+	activeJobsGauge = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "yoinker_active_jobs", Help: "Number of active jobs",
+	})
+	downloadDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name: "yoinker_download_duration_seconds", Help: "Download duration in seconds",
+	})
 )
 
 // JobStatus represents the current status of a job execution
@@ -144,12 +163,24 @@ func computeNextStartTime(jobItem *Job) (nextStart time.Time, overdue bool) {
 
 // scheduleAt sets up the cron scheduler to trigger the job execution with concurrency control
 func (s *Scheduler) scheduleAt(jobItem *Job, startAt time.Time, intervalSeconds int) {
-	_, err := s.cronScheduler.
-		Every(intervalSeconds).Seconds().
-		StartAt(startAt).
-		Do(func() { s.semWrapperWithContext(s.ctx, jobItem) })
-	if err != nil {
-		s.logger.Error("Failed to schedule job", zap.Int("jobID", jobItem.ID), zap.Error(err))
+	var err error
+	if jobItem.Schedule != "" {
+		// Use Cron schedule
+		_, err = s.cronScheduler.Cron(jobItem.Schedule).
+			StartAt(startAt).
+			Do(func() { s.semWrapperWithContext(s.ctx, jobItem) })
+		if err != nil {
+			s.logger.Error("Failed to schedule job with cron schedule", zap.Int("jobID", jobItem.ID), zap.String("schedule", jobItem.Schedule), zap.Error(err))
+		}
+	} else {
+		// Fallback to interval seconds
+		_, err = s.cronScheduler.
+			Every(intervalSeconds).Seconds().
+			StartAt(startAt).
+			Do(func() { s.semWrapperWithContext(s.ctx, jobItem) })
+		if err != nil {
+			s.logger.Error("Failed to schedule job with interval", zap.Int("jobID", jobItem.ID), zap.Int("interval", intervalSeconds), zap.Error(err))
+		}
 	}
 }
 
@@ -178,6 +209,12 @@ func (s *Scheduler) refreshJobs() {
 			go s.semWrapperWithContext(s.ctx, &jobItem)
 		}
 	}
+}
+
+// Refresh reloads all enabled jobs, clearing and re-adding their schedules
+func (s *Scheduler) Refresh() {
+	s.cronScheduler.Clear()
+	s.refreshJobs()
 }
 
 // ScheduleJob schedules a newly created or updated job, handling immediate execution if overdue
@@ -215,7 +252,23 @@ func (s *Scheduler) semWrapperWithContext(ctx context.Context, jobItem *Job) {
 // logs the download, and updates the job's LastRun timestamp.
 // It respects context cancellation for graceful shutdown.
 func (s *Scheduler) executeJobWithContext(ctx context.Context, jobItem *Job) {
-	s.logger.Info("Executing job", zap.Int("jobID", jobItem.ID), zap.String("url", jobItem.URL))
+	// Render templated URL if defined
+	downloadURL := jobItem.URL
+	if strings.Contains(jobItem.URL, "{{") {
+		tpl, err := template.New("url").Parse(jobItem.URL)
+		if err != nil {
+			s.logger.Error("URL template parse error", zap.Error(err))
+		} else {
+			var buf bytes.Buffer
+			tpl.Execute(&buf, map[string]interface{}{"Now": time.Now()})
+			downloadURL = buf.String()
+		}
+	}
+	s.logger.Info("Executing job", zap.Int("jobID", jobItem.ID), zap.String("url", downloadURL))
+
+	// Metrics: track active jobs
+	activeJobsGauge.Inc()
+	defer activeJobsGauge.Dec()
 
 	// Check if context is already done before starting work
 	if ctx.Err() != nil {
@@ -250,7 +303,7 @@ func (s *Scheduler) executeJobWithContext(ctx context.Context, jobItem *Job) {
 	downloadComplete := make(chan struct{})
 	go func() {
 		defer close(downloadComplete)
-		fileHash, execErr = s.attemptDownload(downloadCtx, jobItem, dest)
+		fileHash, execErr = s.attemptDownload(downloadCtx, downloadURL, dest, jobItem.Overwrite)
 	}()
 
 	// Wait for either download completion or context cancellation
@@ -265,8 +318,11 @@ func (s *Scheduler) executeJobWithContext(ctx context.Context, jobItem *Job) {
 	}
 
 	duration := time.Since(startTime)
+	// Metrics: observe duration
+	downloadDuration.Observe(duration.Seconds())
 	if execErr != nil {
 		s.logger.Error("Download failed", zap.Int("jobID", jobItem.ID), zap.Error(execErr), zap.Duration("duration", duration))
+		downloadTotal.WithLabelValues("fail").Inc()
 		s.jobsMutex.Lock()
 		s.activeJobs[jobItem.ID].Status = StatusFailed
 		s.activeJobs[jobItem.ID].Error = execErr
@@ -275,9 +331,50 @@ func (s *Scheduler) executeJobWithContext(ctx context.Context, jobItem *Job) {
 	}
 
 	s.logger.Info("Download succeeded", zap.Int("jobID", jobItem.ID), zap.Duration("duration", duration))
+	downloadTotal.WithLabelValues("success").Inc()
+
+	// Duplicate suppression: skip if hash already logged
+	var exists bool
+	_ = s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM downloads WHERE job_id = ? AND file_hash = ?)`, jobItem.ID, fileHash).Scan(&exists)
+	if exists {
+		s.logger.Info("duplicate detected - skipped ingest", zap.Int("jobID", jobItem.ID), zap.String("hash", fileHash))
+		s.jobsMutex.Lock()
+		s.activeJobs[jobItem.ID].Status = StatusCompleted
+		s.jobsMutex.Unlock()
+		return
+	}
 
 	if err := LogDownload(s.db, jobItem.ID, dest, fileHash); err != nil {
 		s.logger.Error("Failed to log download", zap.Int("jobID", jobItem.ID), zap.Error(err))
+	}
+
+	// Post-download hook or emit
+	now := time.Now()
+	data := map[string]interface{}{"Path": dest, "Now": now}
+	if jobItem.HookTemplate != "" {
+		tpl, err := template.New("hook").Parse(jobItem.HookTemplate)
+		if err != nil {
+			s.logger.Error("hook template parse error", zap.Error(err))
+		} else {
+			var buf bytes.Buffer
+			tpl.Execute(&buf, data)
+			cmd := exec.CommandContext(ctx, "sh", "-c", buf.String())
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				s.logger.Error("hook execution error", zap.Error(err), zap.ByteString("output", out))
+			} else {
+				s.logger.Info("hook executed successfully", zap.ByteString("output", out))
+			}
+		}
+	} else if jobItem.EmitTemplate != "" {
+		tpl, err := template.New("emit").Parse(jobItem.EmitTemplate)
+		if err != nil {
+			s.logger.Error("emit template parse error", zap.Error(err))
+		} else {
+			var buf bytes.Buffer
+			tpl.Execute(&buf, data)
+			s.logger.Info("emit event", zap.String("message", buf.String()))
+		}
 	}
 
 	// Update job's LastRun timestamp.
@@ -296,39 +393,63 @@ func (s *Scheduler) executeJobWithContext(ctx context.Context, jobItem *Job) {
 
 // prepareDestination constructs the download path for a job
 func (s *Scheduler) prepareDestination(jobItem *Job) (string, error) {
+	now := time.Now()
 	// Parse URL path
 	parsed, err := url.Parse(jobItem.URL)
 	if err != nil {
 		return "", fmt.Errorf("invalid URL: %w", err)
 	}
-	// Create job-specific directory
-	jobDir := filepath.Join(s.downloadRoot, fmt.Sprintf("job_%d", jobItem.ID))
+	// Determine sub-directory
+	var subdir string
+	if jobItem.SubdirTemplate != "" {
+		tpl, err := template.New("subdir").Parse(jobItem.SubdirTemplate)
+		if err != nil {
+			return "", err
+		}
+		var buf bytes.Buffer
+		tpl.Execute(&buf, map[string]interface{}{"Now": now})
+		subdir = buf.String()
+	} else {
+		subdir = fmt.Sprintf("job_%d", jobItem.ID)
+	}
+	jobDir := filepath.Join(s.downloadRoot, subdir)
 	if err := os.MkdirAll(jobDir, 0755); err != nil {
 		return "", err
 	}
 	// Determine filename
-	filename := path.Base(parsed.Path)
-	if filename == "" {
-		filename = "downloaded_file"
+	var filename string
+	if jobItem.NameTemplate != "" {
+		tpl, err := template.New("name").Parse(jobItem.NameTemplate)
+		if err != nil {
+			return "", err
+		}
+		var buf bytes.Buffer
+		tpl.Execute(&buf, map[string]interface{}{"Now": now, "URL": jobItem.URL})
+		filename = buf.String()
+	} else {
+		filename = path.Base(parsed.Path)
+		if filename == "" {
+			filename = "downloaded_file"
+		}
+		filename = util.EnsureSafeFilename(filename)
 	}
-	filename = util.EnsureSafeFilename(filename)
 	return filepath.Join(jobDir, filename), nil
 }
 
 // attemptDownload retries downloading up to maxRetries, returning the file hash or error
-func (s *Scheduler) attemptDownload(ctx context.Context, jobItem *Job, dest string) (string, error) {
+func (s *Scheduler) attemptDownload(ctx context.Context, downloadURL, dest string, overwrite bool) (string, error) {
 	var fileHash string
 	var execErr error
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
-		s.logger.Info("Attempting download", zap.Int("attempt", attempt), zap.Int("jobID", jobItem.ID))
-		fileHash, execErr = download.DownloadFileWithContext(ctx, jobItem.URL, dest, jobItem.Overwrite, s.logger)
+		s.logger.Info("Attempting download", zap.Int("attempt", attempt), zap.String("url", downloadURL))
+		fileHash, execErr = download.DownloadFileWithContext(ctx, downloadURL, dest, overwrite, s.logger)
 		if execErr == nil {
 			return fileHash, nil
 		}
-		s.logger.Warn("Download attempt failed", zap.Int("attempt", attempt), zap.Int("jobID", jobItem.ID), zap.Error(execErr))
+		s.logger.Warn("Download attempt failed", zap.Int("attempt", attempt), zap.String("url", downloadURL), zap.Error(execErr))
 		select {
 		case <-ctx.Done():
 			return "", ctx.Err()

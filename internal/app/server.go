@@ -10,7 +10,9 @@ import (
 	"github.com/Takenobou/yoinker/internal/config"
 	"github.com/Takenobou/yoinker/internal/job"
 	"github.com/Takenobou/yoinker/internal/web"
+	"github.com/gofiber/adaptor/v2"
 	"github.com/gofiber/fiber/v2"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 )
 
@@ -43,6 +45,9 @@ func (s *Server) registerRoutes() {
 
 	handlers := web.NewHandlers(s.db, s.logger, s.scheduler)
 	handlers.RegisterRoutes(s.fiberApp)
+
+	// Prometheus metrics endpoint
+	s.fiberApp.Get("/metrics", adaptor.HTTPHandler(promhttp.Handler()))
 }
 
 // RegisterHealthChecks adds enhanced health check endpoints

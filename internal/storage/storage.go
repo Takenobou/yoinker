@@ -61,5 +61,21 @@ func runMigrations(db *sql.DB) error {
 		}
 	}
 
+	// Add new columns if they do not exist
+	alterQueries := []string{
+		`ALTER TABLE jobs ADD COLUMN name_template TEXT;`,
+		`ALTER TABLE jobs ADD COLUMN subdir_template TEXT;`,
+		`ALTER TABLE jobs ADD COLUMN hook_template TEXT;`,
+		`ALTER TABLE jobs ADD COLUMN emit_template TEXT;`,
+		`ALTER TABLE jobs ADD COLUMN schedule TEXT;`,
+	}
+	for _, q := range alterQueries {
+		// ignore errors in case column already exists
+		db.Exec(q)
+	}
+
+	// Auto-migrate legacy integer interval to schedule
+	db.Exec(`UPDATE jobs SET schedule = '@every ' || interval || 's' WHERE (schedule IS NULL OR schedule = '') AND interval IS NOT NULL;`)
+
 	return nil
 }
