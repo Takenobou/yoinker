@@ -12,6 +12,8 @@ type Job struct {
 	Schedule       string     `json:"schedule,omitempty"`
 	Overwrite      bool       `json:"overwrite"`
 	LastRun        *time.Time `json:"last_run,omitempty"`
+	LastETag       string     `json:"last_etag,omitempty"`
+	LastModified   string     `json:"last_modified,omitempty"`
 	Enabled        bool       `json:"enabled"`
 	NameTemplate   string     `json:"name_template,omitempty"`
 	SubdirTemplate string     `json:"subdir_template,omitempty"`
@@ -20,8 +22,8 @@ type Job struct {
 }
 
 func CreateJob(db *sql.DB, job Job) (int64, error) {
-	result, err := db.Exec(`INSERT INTO jobs (url, interval, schedule, overwrite, last_run, enabled, name_template, subdir_template, hook_template, emit_template) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		job.URL, job.Interval, job.Schedule, job.Overwrite, job.LastRun, job.Enabled,
+	result, err := db.Exec(`INSERT INTO jobs (url, interval, schedule, overwrite, last_run, last_etag, last_modified, enabled, name_template, subdir_template, hook_template, emit_template) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		job.URL, job.Interval, job.Schedule, job.Overwrite, job.LastRun, job.LastETag, job.LastModified, job.Enabled,
 		job.NameTemplate, job.SubdirTemplate, job.HookTemplate, job.EmitTemplate)
 	if err != nil {
 		return 0, err
@@ -32,8 +34,8 @@ func CreateJob(db *sql.DB, job Job) (int64, error) {
 func GetJob(db *sql.DB, id int) (*Job, error) {
 	var job Job
 	var lastRun sql.NullTime
-	err := db.QueryRow(`SELECT id, url, interval, schedule, overwrite, last_run, enabled, name_template, subdir_template, hook_template, emit_template FROM jobs WHERE id = ?`,
-		id).Scan(&job.ID, &job.URL, &job.Interval, &job.Schedule, &job.Overwrite, &lastRun, &job.Enabled,
+	err := db.QueryRow(`SELECT id, url, interval, schedule, overwrite, last_run, last_etag, last_modified, enabled, name_template, subdir_template, hook_template, emit_template FROM jobs WHERE id = ?`,
+		id).Scan(&job.ID, &job.URL, &job.Interval, &job.Schedule, &job.Overwrite, &lastRun, &job.LastETag, &job.LastModified, &job.Enabled,
 		&job.NameTemplate, &job.SubdirTemplate, &job.HookTemplate, &job.EmitTemplate)
 	if err != nil {
 		return nil, err
@@ -45,7 +47,7 @@ func GetJob(db *sql.DB, id int) (*Job, error) {
 }
 
 func ListJobs(db *sql.DB) ([]Job, error) {
-	rows, err := db.Query(`SELECT id, url, interval, schedule, overwrite, last_run, enabled, name_template, subdir_template, hook_template, emit_template FROM jobs`)
+	rows, err := db.Query(`SELECT id, url, interval, schedule, overwrite, last_run, last_etag, last_modified, enabled, name_template, subdir_template, hook_template, emit_template FROM jobs`)
 	if err != nil {
 		return nil, err
 	}
@@ -55,7 +57,7 @@ func ListJobs(db *sql.DB) ([]Job, error) {
 	for rows.Next() {
 		var job Job
 		var lastRun sql.NullTime
-		if err := rows.Scan(&job.ID, &job.URL, &job.Interval, &job.Schedule, &job.Overwrite, &lastRun, &job.Enabled,
+		if err := rows.Scan(&job.ID, &job.URL, &job.Interval, &job.Schedule, &job.Overwrite, &lastRun, &job.LastETag, &job.LastModified, &job.Enabled,
 			&job.NameTemplate, &job.SubdirTemplate, &job.HookTemplate, &job.EmitTemplate); err != nil {
 			return nil, err
 		}
@@ -68,8 +70,8 @@ func ListJobs(db *sql.DB) ([]Job, error) {
 }
 
 func UpdateJob(db *sql.DB, job Job) error {
-	_, err := db.Exec(`UPDATE jobs SET url = ?, interval = ?, schedule = ?, overwrite = ?, last_run = ?, enabled = ?, name_template = ?, subdir_template = ?, hook_template = ?, emit_template = ? WHERE id = ?`,
-		job.URL, job.Interval, job.Schedule, job.Overwrite, job.LastRun, job.Enabled,
+	_, err := db.Exec(`UPDATE jobs SET url = ?, interval = ?, schedule = ?, overwrite = ?, last_run = ?, last_etag = ?, last_modified = ?, enabled = ?, name_template = ?, subdir_template = ?, hook_template = ?, emit_template = ? WHERE id = ?`,
+		job.URL, job.Interval, job.Schedule, job.Overwrite, job.LastRun, job.LastETag, job.LastModified, job.Enabled,
 		job.NameTemplate, job.SubdirTemplate, job.HookTemplate, job.EmitTemplate,
 		job.ID)
 	return err

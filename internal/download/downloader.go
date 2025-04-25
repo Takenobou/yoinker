@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -21,36 +22,94 @@ import (
 	"golang.org/x/net/html/charset"
 )
 
+// ErrNotModified is returned when server responds 304 Not Modified
+var ErrNotModified = errors.New("not modified")
+
 // DownloadFile downloads a file from the given URL and writes it to dest.
 // This is a wrapper around DownloadFileWithContext using a background context for backward compatibility.
 func DownloadFile(url, dest string, overwrite bool, logger *zap.Logger) (string, error) {
-	return DownloadFileWithContext(context.Background(), url, dest, overwrite, logger)
+	hash, _, _, err := DownloadFileExtended(context.Background(), url, dest, overwrite, "", "", logger)
+	return hash, err
 }
 
-// DownloadFileWithContext downloads a file from the given URL and writes it to dest.
-// It respects context cancellation for graceful shutdown.
+// Insert wrapper for tests compatibility
 func DownloadFileWithContext(ctx context.Context, url, dest string, overwrite bool, logger *zap.Logger) (string, error) {
+	hash, _, _, err := DownloadFileExtended(ctx, url, dest, overwrite, "", "", logger)
+	return hash, err
+}
+
+// Rename extended function
+func DownloadFileExtended(ctx context.Context, url, dest string, overwrite bool, lastETag, lastModified string, logger *zap.Logger) (string, string, string, error) {
 	logger.Info("Downloading file", zap.String("url", url))
+
+	// Check for resumable download
+	tempDest := dest + ".download"
+	var out *os.File
+	var offset int64
+	if fi, err := os.Stat(tempDest); err == nil {
+		// Resume
+		offset = fi.Size()
+		out, err = os.OpenFile(tempDest, os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			return "", "", "", err
+		}
+		logger.Info("Resuming download", zap.Int64("offset", offset))
+	} else {
+		out, err = os.Create(tempDest)
+		if err != nil {
+			logger.Error("File creation error", zap.Error(err))
+			return "", "", "", err
+		}
+	}
+	defer func() { out.Close() }()
 
 	// Create request with context for cancellation support
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		logger.Error("Failed to create request", zap.Error(err))
-		return "", err
+		return "", "", "", err
+	}
+
+	// Add headers for ETag/Last-Modified
+	if lastETag != "" {
+		req.Header.Set("If-None-Match", lastETag)
+	}
+	if lastModified != "" {
+		req.Header.Set("If-Modified-Since", lastModified)
+	}
+	// Range header for resumable
+	if offset > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
 	}
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
 		logger.Error("HTTP GET error", zap.Error(err))
-		return "", err
+		return "", "", "", err
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode == http.StatusNotModified {
+		logger.Info("Not modified (304), skipping download")
+		return "", resp.Header.Get("ETag"), resp.Header.Get("Last-Modified"), ErrNotModified
+	}
+	if !(resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusPartialContent) {
 		err = fmt.Errorf("bad status: %s", resp.Status)
 		logger.Error("HTTP GET failed", zap.Error(err))
-		return "", err
+		return "", "", "", err
+	}
+
+	// Write body to file
+	if _, err := io.Copy(out, resp.Body); err != nil {
+		logger.Error("Error writing to file", zap.Error(err))
+		return "", "", "", err
+	}
+	// Finalize temp file
+	out.Close()
+	if err := os.Rename(tempDest, dest); err != nil {
+		logger.Error("Error renaming file", zap.Error(err))
+		return "", "", "", err
 	}
 
 	// Determine filename override from Content-Disposition
@@ -69,49 +128,6 @@ func DownloadFileWithContext(ctx context.Context, url, dest string, overwrite bo
 		logger.Info("Overwrite disabled, appending timestamp", zap.String("dest", dest))
 	} else if fileExists(dest) {
 		logger.Info("Overwrite enabled, existing file will be overwritten", zap.String("dest", dest))
-	}
-
-	// Create a temporary file first, then rename on success
-	tempDest := dest + ".download"
-	out, err := os.Create(tempDest)
-	if err != nil {
-		logger.Error("File creation error", zap.Error(err))
-		return "", err
-	}
-	defer func() {
-		out.Close()
-		// Clean up temp file on failure
-		if err != nil {
-			os.Remove(tempDest)
-		}
-	}()
-
-	// Determine if gzip or zip unpack
-	reader := resp.Body
-	// auto-unpack gzip
-	if strings.HasSuffix(strings.ToLower(url), ".gz") || strings.HasSuffix(strings.ToLower(dest), ".gz") {
-		if gz, err := gzip.NewReader(resp.Body); err == nil {
-			reader = gz
-			defer gz.Close()
-		}
-	}
-
-	// Stream download directly to file
-	if _, err := io.Copy(out, reader); err != nil {
-		logger.Error("Error writing to file", zap.Error(err))
-		return "", err
-	}
-
-	// Close the file before renaming
-	if err = out.Close(); err != nil {
-		logger.Error("Error closing file", zap.Error(err))
-		return "", err
-	}
-
-	// Rename temporary file to final destination
-	if err = os.Rename(tempDest, dest); err != nil {
-		logger.Error("Error renaming file", zap.Error(err))
-		return "", err
 	}
 
 	// If gzip unpack removed .gz suffix, adjust dest
@@ -182,10 +198,10 @@ func DownloadFileWithContext(ctx context.Context, url, dest string, overwrite bo
 	hash, err := util.ComputeFileMD5(dest)
 	if err != nil {
 		logger.Error("Failed to compute MD5", zap.Error(err))
-		return "", err
+		return "", "", "", err
 	}
 	logger.Info("Download complete", zap.String("dest", dest), zap.String("hash", hash))
-	return hash, nil
+	return hash, resp.Header.Get("ETag"), resp.Header.Get("Last-Modified"), nil
 }
 
 func fileExists(p string) bool {

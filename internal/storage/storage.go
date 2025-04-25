@@ -68,6 +68,8 @@ func runMigrations(db *sql.DB) error {
 		`ALTER TABLE jobs ADD COLUMN hook_template TEXT;`,
 		`ALTER TABLE jobs ADD COLUMN emit_template TEXT;`,
 		`ALTER TABLE jobs ADD COLUMN schedule TEXT;`,
+		`ALTER TABLE jobs ADD COLUMN last_etag TEXT;`,
+		`ALTER TABLE jobs ADD COLUMN last_modified TEXT;`,
 	}
 	for _, q := range alterQueries {
 		// ignore errors in case column already exists
