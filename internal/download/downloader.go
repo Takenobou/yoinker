@@ -41,27 +41,6 @@ func DownloadFileWithContext(ctx context.Context, url, dest string, overwrite bo
 func DownloadFileExtended(ctx context.Context, url, dest string, overwrite bool, lastETag, lastModified string, logger *zap.Logger) (string, string, string, error) {
 	logger.Info("Downloading file", zap.String("url", url))
 
-	// Check for resumable download
-	tempDest := dest + ".download"
-	var out *os.File
-	var offset int64
-	if fi, err := os.Stat(tempDest); err == nil {
-		// Resume
-		offset = fi.Size()
-		out, err = os.OpenFile(tempDest, os.O_WRONLY|os.O_APPEND, 0644)
-		if err != nil {
-			return "", "", "", err
-		}
-		logger.Info("Resuming download", zap.Int64("offset", offset))
-	} else {
-		out, err = os.Create(tempDest)
-		if err != nil {
-			logger.Error("File creation error", zap.Error(err))
-			return "", "", "", err
-		}
-	}
-	defer func() { out.Close() }()
-
 	// Create request with context for cancellation support
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -75,10 +54,6 @@ func DownloadFileExtended(ctx context.Context, url, dest string, overwrite bool,
 	}
 	if lastModified != "" {
 		req.Header.Set("If-Modified-Since", lastModified)
-	}
-	// Range header for resumable
-	if offset > 0 {
-		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
 	}
 
 	client := &http.Client{}
@@ -99,6 +74,45 @@ func DownloadFileExtended(ctx context.Context, url, dest string, overwrite bool,
 		return "", "", "", err
 	}
 
+	// Decide final destination once based on headers and overwrite
+	// Content-Disposition filename override
+	if cd := resp.Header.Get("Content-Disposition"); cd != "" {
+		if _, params, err := mime.ParseMediaType(cd); err == nil {
+			if filename, ok := params["filename"]; ok {
+				dir := filepath.Dir(dest)
+				dest = filepath.Join(dir, filename)
+				logger.Info("Applying Content-Disposition filename", zap.String("filename", filename))
+			}
+		}
+	}
+	// Timestamp if overwrite disabled
+	if !overwrite {
+		dest = TimestampedFilename(dest)
+		logger.Info("Overwrite disabled, appending timestamp", zap.String("dest", dest))
+	} else if fileExists(dest) {
+		logger.Info("Overwrite enabled, existing file will be overwritten", zap.String("dest", dest))
+	}
+
+	// Prepare temp file for download/resume
+	tempDest := dest + ".download"
+	var out *os.File
+	var offset int64
+	if fi, err := os.Stat(tempDest); err == nil {
+		offset = fi.Size()
+		out, err = os.OpenFile(tempDest, os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			return "", "", "", err
+		}
+		logger.Info("Resuming download", zap.Int64("offset", offset))
+	} else {
+		out, err = os.Create(tempDest)
+		if err != nil {
+			logger.Error("File creation error", zap.Error(err))
+			return "", "", "", err
+		}
+	}
+	defer out.Close()
+
 	// Write body to file
 	if _, err := io.Copy(out, resp.Body); err != nil {
 		logger.Error("Error writing to file", zap.Error(err))
@@ -109,24 +123,6 @@ func DownloadFileExtended(ctx context.Context, url, dest string, overwrite bool,
 	if err := os.Rename(tempDest, dest); err != nil {
 		logger.Error("Error renaming file", zap.Error(err))
 		return "", "", "", err
-	}
-
-	// Determine filename override from Content-Disposition
-	if cd := resp.Header.Get("Content-Disposition"); cd != "" {
-		if _, params, err := mime.ParseMediaType(cd); err == nil {
-			if filename, ok := params["filename"]; ok {
-				dir := filepath.Dir(dest)
-				dest = filepath.Join(dir, filename)
-				logger.Info("Applying Content-Disposition filename", zap.String("filename", filename))
-			}
-		}
-	}
-
-	if !overwrite {
-		dest = TimestampedFilename(dest)
-		logger.Info("Overwrite disabled, appending timestamp", zap.String("dest", dest))
-	} else if fileExists(dest) {
-		logger.Info("Overwrite enabled, existing file will be overwritten", zap.String("dest", dest))
 	}
 
 	// If gzip unpack removed .gz suffix, adjust dest

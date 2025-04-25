@@ -87,3 +87,16 @@ func LogDownload(db *sql.DB, jobID int, filePath, fileHash string) error {
 		jobID, filePath, time.Now(), fileHash)
 	return err
 }
+
+// PruneDownloads deletes downloads older than the given time and returns number of records removed.
+func PruneDownloads(db *sql.DB, cutoff time.Time) (int64, error) {
+	res, err := db.Exec(`DELETE FROM downloads WHERE downloaded_at < ?`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	count, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
+}

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"os/signal"
@@ -55,7 +54,8 @@ func main() {
 	}
 	defer db.Close()
 
-	scheduler := job.NewScheduler(db, logger, cfg.DownloadRoot, cfg.MaxConcurrentDownloads)
+	// Initialize scheduler with unsafe hooks setting
+	scheduler := job.NewScheduler(db, logger, cfg.DownloadRoot, cfg.MaxConcurrentDownloads, cfg.AllowUnsafeHooks)
 	scheduler.Start()
 	defer scheduler.Stop()
 
@@ -98,6 +98,30 @@ func handleCLI(args []string) {
 	}
 	defer db.Close()
 	switch cmd {
+	case "help", "-h", "--help":
+		fmt.Fprintln(os.Stderr, `Usage: yoinker <command> [options]
+Commands:
+  add     --url URL [--interval N] [--schedule CRON] [--overwrite]
+  ls      List all jobs
+  rm      <id>        Remove job by ID
+  stats   Show job and download stats
+  apply   <config.yml> Apply jobs from YAML
+  prune   --older DAYS  Remove downloads older than DAYS
+  help    Show this help message`)
+		os.Exit(0)
+	case "prune":
+		fs := flag.NewFlagSet("prune", flag.ExitOnError)
+		older := fs.Int("older", 180, "Remove downloads older than DAYS (default 180)")
+		fs.Parse(args[1:])
+		days := *older
+		cutoff := time.Now().Add(-time.Hour * 24 * time.Duration(days))
+		count, err := job.PruneDownloads(db, cutoff)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Prune error:", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Pruned %d downloads older than %d days\n", count, days)
+		os.Exit(0)
 	case "add":
 		fs := flag.NewFlagSet("add", flag.ExitOnError)
 		url := fs.String("url", "", "Download URL")
@@ -143,7 +167,7 @@ func handleCLI(args []string) {
 			fmt.Fprintln(os.Stderr, "Usage: yoinker apply <config.yml>")
 			os.Exit(1)
 		}
-		data, err := ioutil.ReadFile(args[1])
+		data, err := os.ReadFile(args[1])
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "Read config error:", err)
 			os.Exit(1)

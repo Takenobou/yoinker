@@ -16,8 +16,9 @@ func InitStorage(cfg *config.Config) (*sql.DB, error) {
 	}
 
 	// Set connection pool settings
-	db.SetMaxOpenConns(25)
-	db.SetMaxIdleConns(5)
+	// Limit writers to avoid SQLITE_BUSY under high concurrency
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(5 * time.Minute)
 
 	// Add a timeout for initialization operations

@@ -51,6 +51,7 @@ Is Yoinker right for you? Ask yourself:
    # Build the server (and CLI)
    export DB_PATH=./data/yoinker.db
    export DOWNLOAD_ROOT=./downloads
+   # before running, ensure DB_PATH is explicitly set (no default fallback)
    go build -o yoinker cmd/yoinker/main.go
    # Start the HTTP server
    ./yoinker
@@ -93,13 +94,13 @@ Is Yoinker right for you? Ask yourself:
 
 ## Configuration
 
-| Environment Variable         | Description                             | Default    |
-|------------------------------|-----------------------------------------|------------|
-| `DB_PATH`                    | SQLite file path or directory           |`yoinker.db`|
-| `PORT`                       | HTTP server port                        | `3000`     |
-| `DOWNLOAD_ROOT`              | Directory for saving downloads          | `downloads`|
-| `MAX_CONCURRENT_DOWNLOADS`   | Maximum parallel downloads              | `5`        |
-| `LOG_LEVEL`                  | Logging level (`debug`,`info`,`error`)  | `info`     |
+| Environment Variable         | Description                             | Default                                    |
+|------------------------------|-----------------------------------------|--------------------------------------------|
+| `DB_PATH`                    | SQLite file path or directory           | _required_                                 |
+| `PORT`                       | HTTP server port                        | `3000`                                     |
+| `DOWNLOAD_ROOT`              | Directory for saving downloads          | `downloads`                                |
+| `MAX_CONCURRENT_DOWNLOADS`   | Maximum parallel downloads              | `5`                                        |
+| `LOG_LEVEL`                  | Logging level (`debug`,`info`,`error`)  | `info`                                     |
 
 > If `DB_PATH` points to a directory, `yoinker.db` will be appended automatically.
 

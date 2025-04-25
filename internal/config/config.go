@@ -15,11 +15,14 @@ type Config struct {
 	LogLevel               string
 	DownloadRoot           string
 	MaxConcurrentDownloads int
+	AllowUnsafeHooks       bool
 }
 
 func LoadConfig() (*Config, error) {
-	// DB_PATH optional; default to ./yoinker.db
-	dbPath := util.GetEnv("DB_PATH", "yoinker.db")
+	dbPath, exists := os.LookupEnv("DB_PATH")
+	if !exists || dbPath == "" {
+		return nil, fmt.Errorf("DB_PATH must be set")
+	}
 
 	cfg := &Config{
 		Port:                   util.GetEnv("PORT", "3000"),
@@ -27,6 +30,7 @@ func LoadConfig() (*Config, error) {
 		LogLevel:               util.GetEnv("LOG_LEVEL", "info"),
 		DownloadRoot:           util.GetEnv("DOWNLOAD_ROOT", "downloads"),
 		MaxConcurrentDownloads: util.GetEnvAsInt("MAX_CONCURRENT_DOWNLOADS", 5),
+		AllowUnsafeHooks:       util.GetEnvAsBool("HOOK_UNSAFE", false),
 	}
 
 	// If DBPath refers to a directory, append default DB filename

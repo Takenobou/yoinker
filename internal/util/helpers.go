@@ -124,6 +124,16 @@ func GetEnvAsInt(key string, defaultVal int) int {
 	return defaultVal
 }
 
+// GetEnvAsBool returns the environment variable key as boolean or defaultVal if unset or invalid
+func GetEnvAsBool(key string, defaultVal bool) bool {
+	if v := os.Getenv(key); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			return b
+		}
+	}
+	return defaultVal
+}
+
 // GetRequiredEnv returns the environment variable key or errors if unset
 func GetRequiredEnv(key string) (string, error) {
 	if v := os.Getenv(key); v != "" {

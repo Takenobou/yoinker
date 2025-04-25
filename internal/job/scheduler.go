@@ -62,30 +62,35 @@ type ActiveJob struct {
 
 // Scheduler manages the scheduling and execution of download jobs
 type Scheduler struct {
-	db            *sql.DB            // Database connection for job persistence
-	logger        *zap.Logger        // Logger for recording scheduler events
-	downloadRoot  string             // Root directory for downloads
-	maxConcurrent int                // Maximum number of concurrent downloads
-	cronScheduler *gocron.Scheduler  // Underlying cron scheduler
-	sem           chan struct{}      // Semaphore for limiting concurrent downloads
-	ctx           context.Context    // Context for graceful shutdown
-	cancel        context.CancelFunc // Function to cancel the context
-	activeJobs    map[int]*ActiveJob // Map of currently active jobs by ID
-	jobsMutex     sync.RWMutex       // Mutex for safe concurrent access to the jobs map
+	db               *sql.DB            // Database connection for job persistence
+	logger           *zap.Logger        // Logger for recording scheduler events
+	downloadRoot     string             // Root directory for downloads
+	maxConcurrent    int                // Maximum number of concurrent downloads
+	allowUnsafeHooks bool               // whether to permit shell-based hook execution
+	cronScheduler    *gocron.Scheduler  // Underlying cron scheduler
+	sem              chan struct{}      // Semaphore for limiting concurrent downloads
+	ctx              context.Context    // Context for graceful shutdown
+	cancel           context.CancelFunc // Function to cancel the context
+	activeJobs       map[int]*ActiveJob // Map of currently active jobs by ID
+	jobsMutex        sync.RWMutex       // Mutex for safe concurrent access to the jobs map
+	nowFunc          func() time.Time   // Function to obtain current time (for testing)
 }
 
-func NewScheduler(db *sql.DB, logger *zap.Logger, downloadRoot string, maxConcurrent int) *Scheduler {
+// NewScheduler creates a Scheduler; allowUnsafeHooks controls hook execution
+func NewScheduler(db *sql.DB, logger *zap.Logger, downloadRoot string, maxConcurrent int, allowUnsafeHooks bool) *Scheduler {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Scheduler{
-		db:            db,
-		logger:        logger,
-		downloadRoot:  downloadRoot,
-		maxConcurrent: maxConcurrent,
-		cronScheduler: gocron.NewScheduler(time.Local),
-		sem:           make(chan struct{}, maxConcurrent),
-		ctx:           ctx,
-		cancel:        cancel,
-		activeJobs:    make(map[int]*ActiveJob),
+		db:               db,
+		logger:           logger,
+		downloadRoot:     downloadRoot,
+		maxConcurrent:    maxConcurrent,
+		allowUnsafeHooks: allowUnsafeHooks,
+		cronScheduler:    gocron.NewScheduler(time.Local),
+		sem:              make(chan struct{}, maxConcurrent),
+		ctx:              ctx,
+		cancel:           cancel,
+		activeJobs:       make(map[int]*ActiveJob),
+		nowFunc:          time.Now,
 	}
 }
 
@@ -159,6 +164,11 @@ func computeNextStartTime(jobItem *Job) (nextStart time.Time, overdue bool) {
 		return now.Add(time.Second * time.Duration(jobItem.Interval)), true
 	}
 	return candidate, false
+}
+
+// ComputeNextStartTime returns next start time and overdue flag for a job (exported for testing).
+func ComputeNextStartTime(jobItem *Job) (time.Time, bool) {
+	return computeNextStartTime(jobItem)
 }
 
 // scheduleAt sets up the cron scheduler to trigger the job execution with concurrency control
@@ -343,6 +353,13 @@ func (s *Scheduler) executeJobWithContext(ctx context.Context, jobItem *Job) {
 	_ = s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM downloads WHERE job_id = ? AND file_hash = ?)`, jobItem.ID, fileHash).Scan(&exists)
 	if exists {
 		s.logger.Info("duplicate detected - skipped ingest", zap.Int("jobID", jobItem.ID), zap.String("hash", fileHash))
+		// Persist updated headers and timestamp even on duplicate
+		jobItem.LastETag = newETag
+		jobItem.LastModified = newLastMod
+		jobItem.LastRun = &startTime
+		if err := UpdateJob(s.db, *jobItem); err != nil {
+			s.logger.Error("Failed to update job after duplicate", zap.Int("jobID", jobItem.ID), zap.Error(err))
+		}
 		s.jobsMutex.Lock()
 		s.activeJobs[jobItem.ID].Status = StatusCompleted
 		s.jobsMutex.Unlock()
@@ -357,18 +374,22 @@ func (s *Scheduler) executeJobWithContext(ctx context.Context, jobItem *Job) {
 	now := time.Now()
 	data := map[string]interface{}{"Path": dest, "Now": now}
 	if jobItem.HookTemplate != "" {
-		tpl, err := template.New("hook").Parse(jobItem.HookTemplate)
-		if err != nil {
-			s.logger.Error("hook template parse error", zap.Error(err))
+		if !s.allowUnsafeHooks {
+			s.logger.Error("Unsafe hooks disabled, skipping execution", zap.Int("jobID", jobItem.ID))
 		} else {
-			var buf bytes.Buffer
-			tpl.Execute(&buf, data)
-			cmd := exec.CommandContext(ctx, "sh", "-c", buf.String())
-			out, err := cmd.CombinedOutput()
+			tpl, err := template.New("hook").Parse(jobItem.HookTemplate)
 			if err != nil {
-				s.logger.Error("hook execution error", zap.Error(err), zap.ByteString("output", out))
+				s.logger.Error("hook template parse error", zap.Error(err))
 			} else {
-				s.logger.Info("hook executed successfully", zap.ByteString("output", out))
+				var buf bytes.Buffer
+				tpl.Execute(&buf, data)
+				cmd := exec.CommandContext(ctx, "sh", "-c", buf.String())
+				out, err := cmd.CombinedOutput()
+				if err != nil {
+					s.logger.Error("hook execution error", zap.Error(err), zap.ByteString("output", out))
+				} else {
+					s.logger.Info("hook executed successfully", zap.ByteString("output", out))
+				}
 			}
 		}
 	} else if jobItem.EmitTemplate != "" {
@@ -398,7 +419,7 @@ func (s *Scheduler) executeJobWithContext(ctx context.Context, jobItem *Job) {
 
 // prepareDestination constructs the download path for a job
 func (s *Scheduler) prepareDestination(jobItem *Job) (string, error) {
-	now := time.Now()
+	now := s.nowFunc()
 	// Parse URL path
 	parsed, err := url.Parse(jobItem.URL)
 	if err != nil {
@@ -439,4 +460,14 @@ func (s *Scheduler) prepareDestination(jobItem *Job) (string, error) {
 		filename = util.EnsureSafeFilename(filename)
 	}
 	return filepath.Join(jobDir, filename), nil
+}
+
+// PrepareDestination constructs the download path for a job (exported for testing)
+func (s *Scheduler) PrepareDestination(jobItem *Job) (string, error) {
+	return s.prepareDestination(jobItem)
+}
+
+// SetNowFunc sets the function used to obtain current time (for testing)
+func (s *Scheduler) SetNowFunc(fn func() time.Time) {
+	s.nowFunc = fn
 }
