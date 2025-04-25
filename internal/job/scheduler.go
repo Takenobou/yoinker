@@ -150,13 +150,23 @@ func (s *Scheduler) Stop() {
 	}
 }
 
-// computeNextStartTime computes the next start time for a given job.
-// If the job has never run or the candidate time (LastRun + Interval)
-// is before or equal to now, it flags the job as overdue.
+// computeNextStartTime computes the next start time for a given job using default time.Now.
 func computeNextStartTime(jobItem *Job) (nextStart time.Time, overdue bool) {
 	now := time.Now()
 	if jobItem.LastRun == nil {
-		// Job never ran; schedule for now+interval and mark as overdue.
+		return now.Add(time.Second * time.Duration(jobItem.Interval)), true
+	}
+	candidate := jobItem.LastRun.Add(time.Second * time.Duration(jobItem.Interval))
+	if candidate.Before(now) || candidate.Equal(now) {
+		return now.Add(time.Second * time.Duration(jobItem.Interval)), true
+	}
+	return candidate, false
+}
+
+// computeNext uses scheduler's nowFunc to compute next start time and overdue flag.
+func (s *Scheduler) computeNext(jobItem *Job) (time.Time, bool) {
+	now := s.nowFunc()
+	if jobItem.LastRun == nil {
 		return now.Add(time.Second * time.Duration(jobItem.Interval)), true
 	}
 	candidate := jobItem.LastRun.Add(time.Second * time.Duration(jobItem.Interval))
@@ -209,7 +219,7 @@ func (s *Scheduler) refreshJobs() {
 			continue
 		}
 
-		nextStart, overdue := computeNextStartTime(&jobItem)
+		nextStart, overdue := s.computeNext(&jobItem)
 		s.logger.Info("Scheduling job", zap.Int("jobID", jobItem.ID), zap.Time("nextStart", nextStart), zap.Int("intervalSeconds", jobItem.Interval))
 
 		s.scheduleAt(&jobItem, nextStart, jobItem.Interval)
@@ -233,12 +243,12 @@ func (s *Scheduler) ScheduleJob(jobItem *Job) {
 		return
 	}
 
-	nextStart, overdue := computeNextStartTime(jobItem)
+	nextStart, overdue := s.computeNext(jobItem)
 	if overdue {
 		s.logger.Info("New job is overdue, executing immediately", zap.Int("jobID", jobItem.ID))
 		go s.semWrapperWithContext(s.ctx, jobItem)
 		// Recurring schedule starts after interval
-		newStart := time.Now().Add(time.Second * time.Duration(jobItem.Interval))
+		newStart := s.nowFunc().Add(time.Second * time.Duration(jobItem.Interval))
 		s.logger.Info("Scheduling recurring job", zap.Int("jobID", jobItem.ID), zap.Time("newStart", newStart))
 		s.scheduleAt(jobItem, newStart, jobItem.Interval)
 	} else {

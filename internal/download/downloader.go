@@ -55,6 +55,10 @@ func DownloadFileExtended(ctx context.Context, url, dest string, overwrite bool,
 	if lastModified != "" {
 		req.Header.Set("If-Modified-Since", lastModified)
 	}
+	// Resume support: set Range header if temp file exists
+	if fi, err := os.Stat(dest + ".download"); err == nil && fi.Size() > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", fi.Size()))
+	}
 
 	client := &http.Client{}
 	resp, err := client.Do(req)

@@ -50,6 +50,7 @@ Is Yoinker right for you? Ask yourself:
    ```bash
    # Build the server (and CLI)
    export DB_PATH=./data/yoinker.db
+   export HOOK_UNSAFE=1    # Enable post-download shell hooks
    export DOWNLOAD_ROOT=./downloads
    # before running, ensure DB_PATH is explicitly set (no default fallback)
    go build -o yoinker cmd/yoinker/main.go
@@ -96,11 +97,12 @@ Is Yoinker right for you? Ask yourself:
 
 | Environment Variable         | Description                             | Default                                    |
 |------------------------------|-----------------------------------------|--------------------------------------------|
-| `DB_PATH`                    | SQLite file path or directory           | _required_                                 |
+| `DB_PATH`                    | SQLite file path or directory           | **required**                               |
 | `PORT`                       | HTTP server port                        | `3000`                                     |
 | `DOWNLOAD_ROOT`              | Directory for saving downloads          | `downloads`                                |
 | `MAX_CONCURRENT_DOWNLOADS`   | Maximum parallel downloads              | `5`                                        |
 | `LOG_LEVEL`                  | Logging level (`debug`,`info`,`error`)  | `info`                                     |
+| `HOOK_UNSAFE`                | Enable execution of post-download shell hooks | `false`                                |
 
 > If `DB_PATH` points to a directory, `yoinker.db` will be appended automatically.
 

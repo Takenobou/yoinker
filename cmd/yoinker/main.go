@@ -107,7 +107,12 @@ Commands:
   stats   Show job and download stats
   apply   <config.yml> Apply jobs from YAML
   prune   --older DAYS  Remove downloads older than DAYS
-  help    Show this help message`)
+  help    Show this help message
+
+Environment Variables:
+  HOOK_UNSAFE=true    Enable execution of post-download shell hooks (default false)
+  DB_PATH             SQLite file path (required)
+`)
 		os.Exit(0)
 	case "prune":
 		fs := flag.NewFlagSet("prune", flag.ExitOnError)

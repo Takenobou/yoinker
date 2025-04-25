@@ -2,6 +2,7 @@ package job
 
 import (
 	"database/sql"
+	"os"
 	"time"
 )
 
@@ -90,6 +91,21 @@ func LogDownload(db *sql.DB, jobID int, filePath, fileHash string) error {
 
 // PruneDownloads deletes downloads older than the given time and returns number of records removed.
 func PruneDownloads(db *sql.DB, cutoff time.Time) (int64, error) {
+	// Collect file paths to remove
+	rows, err := db.Query(`SELECT file_path FROM downloads WHERE downloaded_at < ?`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	var paths []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err == nil {
+			paths = append(paths, p)
+		}
+	}
+
+	// Delete DB rows
 	res, err := db.Exec(`DELETE FROM downloads WHERE downloaded_at < ?`, cutoff)
 	if err != nil {
 		return 0, err
@@ -97,6 +113,11 @@ func PruneDownloads(db *sql.DB, cutoff time.Time) (int64, error) {
 	count, err := res.RowsAffected()
 	if err != nil {
 		return 0, err
+	}
+
+	// Remove files from disk
+	for _, p := range paths {
+		os.Remove(p)
 	}
 	return count, nil
 }
